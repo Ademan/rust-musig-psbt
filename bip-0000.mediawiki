@@ -1,0 +1,125 @@
+<pre>
+  BIP: XXXX
+  Layer: Applications
+  Title: Partially Signed Bitcoin Transaction Format
+  Author: Daniel Roberts <ademan555@gmail.com>
+  Comments-Summary: No comments yet.
+  Comments-URI: TBD
+  Status: ???
+  Type: ???
+  Created: 2023-09-21
+  License: BSD-2-Clause
+</pre>
+
+==Introduction==
+
+===Abstract===
+
+This document proposes additional fields for BIP 174 PSBTv0 and BIP 370 PSBTv2 that allows
+for musig signing data to be included in a PSBT of any version. These are per-party fields for public keys, musig public nonces, and musig partial signatures.
+
+===Copyright===
+
+This BIP is licensed under the 2-clause BSD license.
+
+===Motivation===
+
+Musig presents a new way to create multisignatures, however creation of these multisignatures requires multi-party computation in multiple rounds of communication.
+This BIP specifies a way to store intermediate musig signing data in a way that is interoperable between implementations.
+
+==Specification==
+
+===Proprietary Use Type===
+
+This BIP recommends using a proprietary identifier "musig" if and until this BIP is standardized.
+
+===Proprietary Key/Value Pairs===
+
+A participant is identified by their 33 byte compressed public key.
+
+At some point in the protocol at least one participant must posess a PSBT containing one MUSIG_IN_PUBLIC_NONCE key/value for each participant.
+At some point in the protocol at least one participant must posess a PSBT containing one MUSIG_IN_PARTIAL_SIGNATURE key/value for each participant.
+
+{|
+! Name
+! <tt><proprietarykeyprefix></tt>
+! <tt><proprietarykeytype></tt>
+! <tt><keydata></tt>
+! <tt><keydata></tt> Description
+! <tt><valuedata></tt>
+! <tt><valuedata></tt> Description
+! Versions Requiring Inclusion
+! Versions Requiring Exclusion
+! Versions Allowing Inclusion
+! Parent BIP
+|-
+| Participant
+| <tt>'musig'</tt>
+| <tt>MUSIG_IN_PARTICIPANT = 0x00</tt>
+| <tt><32-bit little endian unsigned int index></tt>
+| The integer sort key of this participant in the aggregate public key
+| <tt><bytes pubkey></tt>
+| The 33 byte compressed public key of this participant
+|-
+| Musig Public Nonce
+| <tt>'musig'</tt>
+| <tt>MUSIG_IN_PUBLIC_NONCE = 0x01</tt>
+| <tt><bytes pubkey></tt>
+| The 33 byte compressed public key of the participant which produced this public nonce
+| <tt><bytes public nonce></tt>
+| The 66 byte public nonce produced by this participant
+|-
+| Musig Partial Signature
+| <tt>'musig'</tt>
+| <tt>MUSIG_IN_PARTIAL_SIGNATURE = 0x02</tt>
+| <tt><bytes pubkey></tt>
+| The 33 byte compressed public key of the participant which produced this public nonce
+| <tt><bytes partial signature></tt>
+| The 32 byte partial signature produced by this participant
+|}
+
+==Roles==
+
+The roles defined in BIP-0174 should perform the following actions in addition to those specified in BIP-0174.
+
+===Creator===
+
+===Updater===
+
+===Signer===
+
+====Data Signers Check For====
+
+=====Signer Overview=====
+
+====Change Detection====
+
+===Combiner===
+
+===Input Finalizer===
+
+===Transaction Extractor===
+
+==Encoding==
+
+==Extensibility==
+
+==Compatibility==
+
+==Examples==
+
+==Test Vectors==
+
+==Rationale==
+
+Producing and aggregating multi-party data for signing is a common procedure.
+The author identified ad-hoc implementations in two places in his own code, and decided that standardizing a way to store this data in PSBTs could be valuable.
+
+==Reference implementation==
+
+TODO
+
+==Acknowledgements==
+
+TODO: Too many people to count
+
