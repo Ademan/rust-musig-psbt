@@ -1,6 +1,5 @@
 mod psbt;
 mod serialize;
-mod util;
 
 pub use secp256k1_zkp::{
     All as ZkpAll,
