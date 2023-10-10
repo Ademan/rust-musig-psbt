@@ -600,7 +600,7 @@ pub enum SignatureAggregateError {
     NoParticipantsError,
 }
 
-/// Context to combine partial signatures, computing a final aggregate signature 
+/// Context to combine partial signatures, computing a final aggregate signature
 pub struct KeyspendSignatureAggregationContext<'a, C: ZkpVerification + ZkpSigning> {
     secp: &'a ZkpSecp256k1<C>,
     prefix: Vec<u8>,

@@ -55,6 +55,7 @@ use clap::{
 };
 
 use musig_psbt::{
+    ExtraRand,
     FromZkp,
     KeyspendContext,
     MusigAggNonce,
@@ -246,8 +247,8 @@ fn sign(privkey_path: &Path, participant_pubkeys: &Vec<PublicKey>) {
 
     let session = MusigSessionId::random();
 
-    // TODO: timestamp into extra_rand
-    let signing_context = keyspend_context.add_nonce(&mut aggregate_psbt, input_index, session, [0u8; 32])
+    let extra = ExtraRand::tagged(b"musig/extra-rand").nanotime();
+    let signing_context = keyspend_context.add_nonce(&mut aggregate_psbt, input_index, session, extra.into_bytes())
         .expect("nonce generate success");
 
     println!("With nonce: ");

@@ -33,6 +33,38 @@ pub use bitcoin::psbt::{
     PartiallySignedTransaction,
 };
 
+use bitcoin_hashes::{
+    Hash,
+    HashEngine,
+};
+
+use bitcoin_hashes::sha256::{
+    Hash as Sha256,
+    HashEngine as Sha256HashEngine,
+};
+
+use std::time::{
+    UNIX_EPOCH,
+};
+
+pub use crate::psbt::{
+    AggregateError,
+    KeyAggregateContext,
+    KeyspendContext,
+    KeyspendSignContext,
+    KeyspendSignatureAggregationContext,
+    NonceGenerateError,
+    ParticipantIndex,
+    PsbtInputHelper,
+    SignError,
+    SignatureAggregateError,
+};
+
+pub use crate::serialize::{
+    SerializeError,
+    DeserializeError,
+};
+
 pub trait FromZkp {
     type TargetType;
 
@@ -117,23 +149,39 @@ impl ToZkp for PublicKey {
     }
 }
 
-pub use crate::psbt::{
-    AggregateError,
-    KeyAggregateContext,
-    KeyspendContext,
-    KeyspendSignContext,
-    KeyspendSignatureAggregationContext,
-    NonceGenerateError,
-    ParticipantIndex,
-    PsbtInputHelper,
-    SignError,
-    SignatureAggregateError,
-};
+pub struct ExtraRand(pub Sha256HashEngine);
 
-pub use crate::serialize::{
-    SerializeError,
-    DeserializeError,
-};
+impl ExtraRand {
+    pub fn new() -> Self {
+        ExtraRand(Sha256HashEngine::default())
+    }
+
+    pub fn tagged(tag: &[u8]) -> Self {
+        let mut engine = Sha256HashEngine::default();
+        let hashed_tag = Sha256::hash(tag);
+
+        engine.input(&hashed_tag);
+        engine.input(&hashed_tag);
+
+        ExtraRand(engine)
+    }
+
+    pub fn nanotime(mut self) -> Self {
+        // TODO: Review assumption, probably better to panic anyway than to try to be clever
+        // This is generally safe from panic, only a drastically misconfigured device would have a
+        // current time before the epoch.
+        let elapsed_nanos = UNIX_EPOCH.elapsed()
+                                      .expect("Time elapsed since unix epoch")
+                                      .as_nanos();
+        self.0.input(&elapsed_nanos.to_be_bytes());
+
+        self
+    }
+
+    pub fn into_bytes(self) -> [u8; 32] {
+        Sha256::from_engine(self.0).into_inner()
+    }
+}
 
 #[cfg(test)]
 mod tests {
