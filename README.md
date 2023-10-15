@@ -5,17 +5,17 @@ Caveat emptor! See Warning section.
 # Goals
 
 1. Provide a critical building block for my [Boomfund](boomfund.net) assurance contract project
-2. Explore the desirability of using PSBTs to coordinate collaborative signing in musig
-3. Explore the design space of this problem
-4. Seek third party comments on design
+2. ~~Explore the desirability of using PSBTs to coordinate collaborative signing in musig~~ The existence of a [draft bip](https://github.com/achow101/bips/tree/musig2-psbt) suggests it is desirable.
+3. ~~Explore the design space of this problem~~ The draft bip is very similar to this proposal in the keyspend case, however this proposal does not address script spends, making the bip a superset.
+4. ~~Seek third party comments on design~~ The draft bip will attract the necessary comments.
 5. Be useful to third parties (after careful review)
-6. (Potentially) seek standardization in a BIP (*lots* more work to be done, in terms of documentation and process development)
-
-# Design
-
-Design is subject to change!
+6. ~~(Potentially) seek standardization in a BIP (*lots* more work to be done, in terms of documentation and process development)~~ The author of this proposal is satisfied the draft bip is superior to this proposal.
 
 ## PSBT Serialization
+
+### DEPRECATED
+
+This proposal should be considered deprecated, this section will be removed after the code is updated to reflect the [draft bip](https://github.com/achow101/bips/tree/musig2-psbt).
 
 ### Overview
 - 3 proprietary Key/Value pairs
@@ -69,7 +69,6 @@ Design is subject to change!
   - If authentication is added, signatures should also commit to the "signing session" they are participating in case of previous failed rounds, to prevent replays
   - Might be required if there is not a central coordinator
 - Should the aggnonce be encodable in the PSBT as an optimization when there is a central coordinator? (KISS for now)
-- Should this proposal define anything related to descriptors?
 - Future proofing for signature adaptors?
 
 # Warning
@@ -83,7 +82,6 @@ This is also the author's first rust project, you have been warned again.
 
 ## Known Issues
 
-* Zero feedback on general concept and direction
 * Wildly insufficient tests
 * Zero third party review
 * Doesn't support taproot script spend (TODO)
