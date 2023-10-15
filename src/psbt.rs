@@ -1,5 +1,6 @@
 use bitcoin::{
     SchnorrSighashType,
+    Script,
     TxOut,
 };
 
@@ -11,6 +12,9 @@ use bitcoin::psbt::{
 
 use bitcoin::secp256k1::{
     PublicKey,
+    Signing,
+    Secp256k1,
+    Verification,
 };
 
 use bitcoin::util::sighash::{
@@ -44,7 +48,6 @@ use crate::{
     MusigSessionId,
     PartiallySignedTransaction,
     ToZkp,
-    XOnlyPublicKey,
     ZkpKeyPair,
     ZkpPublicKey,
     ZkpSchnorrSignature,
@@ -113,11 +116,11 @@ impl Display for SighashError {
 }
 
 #[derive(Debug)]
-enum TweakError {
+pub enum TweakError {
     TweakError,
 }
 
-fn tweak_keyagg<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, keyagg_cache: &mut MusigKeyAggCache, merkle_root: Option<TapBranchHash>) -> Result<(ZkpXOnlyPublicKey, ZkpXOnlyPublicKey), TweakError> {
+pub fn tweak_keyagg<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, keyagg_cache: &mut MusigKeyAggCache, merkle_root: Option<TapBranchHash>) -> Result<(ZkpXOnlyPublicKey, ZkpXOnlyPublicKey), TweakError> {
     let inner_pk = keyagg_cache.agg_pk();
 
     let tweak = TapTweakHash::from_key_and_tweak(inner_pk.from_zkp(), merkle_root);
@@ -199,6 +202,138 @@ pub enum AggregateError {
     PlaceholderError,
 }
 
+pub enum PsbtNormalizeAction {
+    NoAction,
+    InternalKeyAdded,
+}
+
+pub enum PsbtNormalizeError {
+    PsbtNormalizeError,
+    InternalKeyAddError(InternalKeyAddError),
+    InvalidInputIndexError,
+}
+
+pub enum InternalKeyAddError {
+    MissingInnerPubkey,
+    InternalKeyAddError,
+    InvalidInputIndexError,
+}
+
+pub enum ParticipantsRepairError {
+    InvalidInputIndexError,
+}
+
+pub struct CoreContext {
+    participants: InputParticipants,
+    keyagg_cache: MusigKeyAggCache,
+    inner_agg_pk: ZkpXOnlyPublicKey,
+    merkle_root: Option<TapBranchHash>,
+}
+
+#[derive(Debug)]
+pub enum CoreContextCreateError {
+    TweakError,
+}
+
+impl CoreContext {
+    pub fn new<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>) -> Result<Self, CoreContextCreateError> {
+        let participants = InputParticipants::from_participant_pubkeys(participant_pubkeys);
+
+        let mut keyagg_cache = participants.to_keyagg_cache(secp);
+
+        let merkle_root = None;
+        let (inner_agg_pk, _) = tweak_keyagg(secp, &mut keyagg_cache, merkle_root)
+            .map_err(|_| CoreContextCreateError::TweakError)?;
+
+        Ok(CoreContext {
+            participants,
+            keyagg_cache,
+            inner_agg_pk,
+            merkle_root,
+        })
+    }
+
+    pub fn updater<'a, C: ZkpSigning>(&'a self, secp: &'a ZkpSecp256k1<C>) -> Updater<'a, C> {
+        Updater {
+            secp,
+            participants: &self.participants,
+            keyagg_cache: &self.keyagg_cache,
+            inner_agg_pk: self.inner_agg_pk,
+            tap_leaf: None, // FIXME
+            merkle_root: self.merkle_root,
+        }
+    }
+}
+
+pub struct Updater<'a, C: ZkpSigning> {
+    secp: &'a ZkpSecp256k1<C>,
+    participants: &'a InputParticipants,
+    keyagg_cache: &'a MusigKeyAggCache,
+    inner_agg_pk: ZkpXOnlyPublicKey,
+    tap_leaf: Option<TapBranchHash>,
+    merkle_root: Option<TapBranchHash>,
+}
+
+impl<'a, C: ZkpVerification + ZkpSigning> From<&'a KeyspendContext<'a, C>> for Updater<'a, C> {
+    fn from(context: &'a KeyspendContext<'a, C>) -> Self {
+        context.updater()
+    }
+}
+
+#[derive(Debug)]
+pub enum SpendInfoAddResult {
+    InputNoMatch, // XXX: Should this be an error?
+    Success {
+        internal_key_modified: bool,
+        merkle_root_modified: bool,
+    },
+}
+
+#[derive(Debug)]
+pub enum SpendInfoAddError {
+    WitnessUtxoMissing,
+}
+
+impl<'a, C: ZkpSigning> Updater<'a, C> {
+    pub fn add_spend_info<C2: Verification>(&self, secp: &Secp256k1<C2>, input: &mut PsbtInput) -> Result<SpendInfoAddResult, SpendInfoAddError> {
+        let script = Script::new_v1_p2tr(secp,
+                                         self.inner_agg_pk.from_zkp(),
+                                         self.merkle_root);
+
+        let utxo = input.witness_utxo
+            .as_ref()
+            .ok_or(SpendInfoAddError::WitnessUtxoMissing)?;
+
+        if utxo.script_pubkey.clone() != script.clone() {
+            return Ok(SpendInfoAddResult::InputNoMatch);
+        }
+
+        let mut internal_key_modified = false;
+        let mut merkle_root_modified = false;
+
+        let tap_internal_key = Some(self.inner_agg_pk.from_zkp());
+
+        if input.tap_internal_key != tap_internal_key {
+            input.tap_internal_key = tap_internal_key;
+            internal_key_modified = true;
+        }
+
+        if input.tap_merkle_root != self.merkle_root {
+            input.tap_merkle_root = self.merkle_root;
+            merkle_root_modified = true;
+        }
+
+        Ok(SpendInfoAddResult::Success {
+            internal_key_modified,
+            merkle_root_modified,
+        })
+    }
+
+    pub fn fix_participants(&self, input: &mut PsbtInput) -> bool {
+        unimplemented!();
+    }
+}
+
 impl<'a, C: ZkpVerification + ZkpSigning> KeyAggregateContext<'a, C> {
     pub fn new(secp: &'a ZkpSecp256k1<C>, pubkey: ZkpPublicKey, prefix: Vec<u8>) -> Self {
         KeyAggregateContext {
@@ -208,8 +343,6 @@ impl<'a, C: ZkpVerification + ZkpSigning> KeyAggregateContext<'a, C> {
         }
     }
 
-    // TODO: Add way for client to construct KeyspendContext with out-of-band communicated
-    // participant list
     /// Aggregate pubkeys from a psbt input in preparation for signing
     pub fn keyspend_aggregate(&'a self, psbt: &PartiallySignedTransaction, input_index: usize) -> Result<KeyspendContext<'a, C>, AggregateError> {
         let input = psbt.inputs
@@ -350,6 +483,9 @@ pub struct KeyspendContext<'a, C: ZkpSigning> {
     absent_participants_valid: bool,
     keyagg_cache: MusigKeyAggCache,
     inner_agg_pk: ZkpXOnlyPublicKey,
+
+    // TODO: enable and use and rename struct
+    // tap_leaf: Option<TapBranchHash>,
 }
 
 #[derive(Debug)]
@@ -365,8 +501,6 @@ pub enum NonceGenerateError {
     NoParticipantsError,
     PlaceholderError,
 }
-
-// FIXME: in analog with other keys, maybe we should have the pubkey be the key for everything
 
 impl<'a, C: ZkpVerification + ZkpSigning> KeyspendContext<'a, C> {
     pub fn from_participant_pubkeys(secp: &'a ZkpSecp256k1<C>, prefix: Vec<u8>, pubkey: PublicKey, participants: Vec<PublicKey>, merkle_root: Option<TapBranchHash>) -> Result<Self, AggregateError> {
@@ -386,6 +520,39 @@ impl<'a, C: ZkpVerification + ZkpSigning> KeyspendContext<'a, C> {
             inner_agg_pk,
         })
     }
+
+    pub fn updater(&'a self) -> Updater<'a, C> {
+        Updater {
+            secp: self.secp,
+            //prefix: self.prefix.to_owned(),
+            participants: &self.participants,
+            keyagg_cache: &self.keyagg_cache,
+            inner_agg_pk: self.inner_agg_pk,
+            tap_leaf: None,
+            merkle_root: None,
+        }
+    }
+
+    /*
+    fn normalize(&self, psbt: &mut PartiallySignedTransaction, input_index: usize) -> Result<Vec<PsbtNormalizeAction>, PsbtNormalizeError> {
+        psbt.inputs
+            .get(input_index)
+            .ok_or(PsbtNormalizeError::InvalidInputIndexError)?;
+
+        let mut actions: Vec<PsbtNormalizeAction> = Vec::new();
+
+        let context = self.updater();
+
+        let mut action = context.normalize_internal_key(psbt, input_index)
+            .map_err(|e| PsbtNormalizeError::InternalKeyAddError(e))?;
+
+        if action != PsbtNormalizeAction::NoAction {
+            actions.push(action);
+        }
+
+        unimplemented!();
+    }
+    */
 
     pub fn generate_nonce(&'a self, psbt: &PartiallySignedTransaction, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<KeyspendSignContext<'a, C>, NonceGenerateError> {
         let input = psbt.inputs.get(input_index)

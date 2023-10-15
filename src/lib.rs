@@ -13,6 +13,7 @@ pub use secp256k1_zkp::{
     MusigSecNonce,
     MusigSession,
     MusigSessionId,
+    Parity as ZkpParity,
     PublicKey as ZkpPublicKey,
     Secp256k1 as ZkpSecp256k1,
     SecretKey as ZkpSecretKey,
@@ -49,6 +50,8 @@ use std::time::{
 
 pub use crate::psbt::{
     AggregateError,
+    CoreContext,
+    CoreContextCreateError,
     KeyAggregateContext,
     KeyspendContext,
     KeyspendSignContext,
@@ -58,6 +61,8 @@ pub use crate::psbt::{
     PsbtInputHelper,
     SignError,
     SignatureAggregateError,
+    SpendInfoAddResult,
+    tweak_keyagg,
 };
 
 pub use crate::serialize::{
