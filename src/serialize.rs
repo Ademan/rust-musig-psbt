@@ -8,8 +8,10 @@ use bitcoin::consensus::encode::{
 };
 
 use bitcoin::psbt::{
-    raw::ProprietaryKey,
-    raw::ProprietaryType,
+    Input as PsbtInput,
+    raw::Key as PsbtKey,
+    //raw::ProprietaryKey,
+    //raw::ProprietaryType,
 };
 
 use bitcoin::secp256k1::{
@@ -46,10 +48,6 @@ use std::io::{
     Write,
 };
 
-use std::marker::{
-    PhantomData,
-};
-
 use std::mem::{
     size_of,
 };
@@ -58,7 +56,14 @@ use crate::{
     psbt::ParticipantIndex,
 };
 
+// FIXME: psbt key types are actually var ints, once rust-bitcoin updates, update here
+pub type PsbtKeyType = u8;
+
 const MUSIG_PARTIAL_SIGNATURE_SERIALIZED_LEN: usize = 32;
+
+pub const PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS: u8 = 0x19;
+pub const PSBT_IN_MUSIG2_PUB_NONCE: u8 = 0x1a;
+pub const PSBT_IN_MUSIG_PARTIAL_SIG: u8 = 0x1b;
 
 #[derive(Debug)]
 pub enum SerializeError {
@@ -125,6 +130,70 @@ impl<A, B> PsbtValue for (A, B)
         let b = B::deserialize(reader)?;
 
         Ok((a, b))
+    }
+}
+
+trait KnownSize {
+    const SIZE: usize;
+}
+
+impl<T> PsbtValue for Option<T>
+    where
+        T: PsbtValue + KnownSize,
+{
+    fn serialize<W: Write>(&self, writer: &mut W) -> Result<(), SerializeError> {
+        if let Some(ref inner) = self {
+            inner.serialize(writer)?;
+        }
+
+        Ok(())
+    }
+
+    fn deserialize<R: Read>(reader: &mut R) -> Result<Self, DeserializeError> {
+        let mut buf = vec![0u8; T::SIZE];
+
+        let result = read_all_or_nothing(reader, &mut buf[..])
+            .map_err(|_e| DeserializeError::DeserializeError)?;
+
+        // XXX: Messy
+        match result.map(|_| T::deserialize(&mut Cursor::new(&buf))) {
+        Some(x) => { Ok(Some(x?)) },
+        None => Ok(None)
+        }
+    }
+}
+
+pub struct VariableLengthArray<T>(pub Vec<T>);
+
+impl<T> PsbtValue for VariableLengthArray<T>
+    where
+        T: PsbtValue + KnownSize,
+{
+    fn serialize<W: Write>(&self, writer: &mut W) -> Result<(), SerializeError> {
+        for item in self.0.iter() {
+            item.serialize(writer)?;
+        }
+
+        Ok(())
+    }
+
+    fn deserialize<R: Read>(reader: &mut R) -> Result<Self, DeserializeError> {
+        let mut result: Vec<T> = Vec::new();
+        let mut buf = vec![0u8; T::SIZE];
+
+        loop {
+            let read_result = read_all_or_nothing(reader, &mut buf[..])
+                .map_err(|_e| DeserializeError::DeserializeError)?;
+
+            if read_result.is_none() {
+                break;
+            }
+
+            let item = T::deserialize(&mut Cursor::new(&buf))?;
+            result.push(item);
+        }
+
+        Ok(Self(result))
     }
 }
 
@@ -310,10 +379,16 @@ impl PsbtValue for KeySource {
     }
 }
 
-struct ParticipantKey {
-    pub index: ParticipantIndex,
-    pub pubkey: PublicKey,
-}
+pub type ParticipantPubkeysKey = XOnlyPublicKey;
+pub type ParticipantPubkeysValue = VariableLengthArray<PublicKey>;
+
+type SigningDataKey = (PublicKey, XOnlyPublicKey, Option<TapLeafHash>);
+
+pub type PublicNonceKey = SigningDataKey;
+pub type PublicNonceValue = MusigPubNonce;
+
+pub type PartialSignatureKey = SigningDataKey;
+pub type PartialSignatureValue = MusigPartialSignature;
 
 struct Derivation {
     pub master_fingerprint: [u8; 4],
@@ -332,9 +407,9 @@ struct MusigPartialSignatureKeypair {
 
 #[repr(u8)]
 pub enum MusigProprietaryKeySubtype {
-    KeyspendParticipant = 0,
-    KeyspendPublicNonce = 1,
-    KeyspendPartialSignature = 2,
+    KeyspendParticipant = PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS,
+    KeyspendPublicNonce = PSBT_IN_MUSIG2_PUB_NONCE,
+    KeyspendPartialSignature = PSBT_IN_MUSIG_PARTIAL_SIG,
 }
 
 impl TryFrom<u8> for MusigProprietaryKeySubtype {
@@ -372,52 +447,51 @@ fn read_all_or_nothing<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<Option
 }
 
 pub trait ToPsbtKeyValue: Sized {
-    fn to_psbt<'a>(&self, prefix: &'a Vec<u8>) -> Result<(ProprietaryKey, Vec<u8>), SerializeError>;
+    fn to_psbt(&self) -> Result<(PsbtKey, Vec<u8>), SerializeError>;
 }
 
 pub trait FromPsbtKeyValue: Sized {
-    fn from_psbt(key: &ProprietaryKey, value: &Vec<u8>) -> Result<Self, DeserializeError>;
+    fn from_psbt(key: &PsbtKey, value: &Vec<u8>) -> Result<Self, DeserializeError>;
 }
 
-pub trait ProprietaryKeyConvertible {
-    const SUBTYPE: MusigProprietaryKeySubtype;
+pub trait PsbtKeyValue {
+    const KEY_TYPE: MusigProprietaryKeySubtype;
 }
 
-impl ProprietaryKeyConvertible for (ParticipantIndex, PublicKey) {
-    const SUBTYPE: MusigProprietaryKeySubtype = MusigProprietaryKeySubtype::KeyspendParticipant;
+impl PsbtKeyValue for (ParticipantIndex, PublicKey) {
+    const KEY_TYPE: MusigProprietaryKeySubtype = MusigProprietaryKeySubtype::KeyspendParticipant;
 }
 
-impl ProprietaryKeyConvertible for (PublicKey, MusigPubNonce) {
-    const SUBTYPE: MusigProprietaryKeySubtype = MusigProprietaryKeySubtype::KeyspendPublicNonce;
+impl PsbtKeyValue for (PublicKey, MusigPubNonce) {
+    const KEY_TYPE: MusigProprietaryKeySubtype = MusigProprietaryKeySubtype::KeyspendPublicNonce;
 }
 
-impl ProprietaryKeyConvertible for (PublicKey, MusigPartialSignature) {
-    const SUBTYPE: MusigProprietaryKeySubtype = MusigProprietaryKeySubtype::KeyspendPartialSignature;
+impl PsbtKeyValue for (PublicKey, MusigPartialSignature) {
+    const KEY_TYPE: MusigProprietaryKeySubtype = MusigProprietaryKeySubtype::KeyspendPartialSignature;
 }
 
 impl<K: PsbtValue, V: PsbtValue> ToPsbtKeyValue for (K, V)
-    where (K, V): ProprietaryKeyConvertible
+    where (K, V): PsbtKeyValue
 {
-    fn to_psbt<'a>(&self, prefix: &'a Vec<u8>) -> Result<(ProprietaryKey, Vec<u8>), SerializeError> {
+    fn to_psbt(&self) -> Result<(PsbtKey, Vec<u8>), SerializeError> {
         let mut key_buf = Vec::<u8>::new();
         self.0.serialize(&mut key_buf)?;
 
         let mut value_buf = Vec::<u8>::new();
         PsbtValue::serialize(&self.1, &mut value_buf)?;
 
-        Ok((ProprietaryKey {
-            prefix: prefix.to_owned(),
-            subtype: Self::SUBTYPE as u8,
+        Ok((PsbtKey {
+            type_value: Self::KEY_TYPE as PsbtKeyType,
             key: key_buf,
         }, value_buf))
     }
 }
 
 impl<K: PsbtValue, V: PsbtValue> FromPsbtKeyValue for (K, V)
-    where (K, V): ProprietaryKeyConvertible
+    where (K, V): PsbtKeyValue
 {
-    fn from_psbt(key: &ProprietaryKey, value: &Vec<u8>) -> Result<Self, DeserializeError> {
-        if key.subtype != Self::SUBTYPE as u8 {
+    fn from_psbt(key: &PsbtKey, value: &Vec<u8>) -> Result<Self, DeserializeError> {
+        if key.type_value != Self::KEY_TYPE as u8 {
             return Err(DeserializeError::DeserializeError);
         }
 
@@ -431,58 +505,104 @@ impl<K: PsbtValue, V: PsbtValue> FromPsbtKeyValue for (K, V)
     }
 }
 
-pub struct ProprietaryKeyIterator<'a, K: PsbtValue, V: PsbtValue> {
-    keys: BTreeIter<'a, ProprietaryKey, Vec<u8>>,
-    done: bool,
-    prefix: &'a [u8],
-    subtype: ProprietaryType,
-    _type: PhantomData<(K, V)>,
+pub fn filter_key_type<'a>(key_type: PsbtKeyType) -> impl FnMut(&(&PsbtKey, &Vec<u8>)) -> bool {
+    move |&(key, _value)| { key.type_value == key_type }
 }
 
-impl<'a, K: PsbtValue, V: PsbtValue> ProprietaryKeyIterator<'a, K, V> {
-    pub fn new(keys: BTreeIter<'a, ProprietaryKey, Vec<u8>>, prefix: &'a [u8], subtype: ProprietaryType) -> Self {
-        ProprietaryKeyIterator {
-            keys,
-            done: false,
-            prefix, subtype,
-            _type: PhantomData,
-        }
+pub fn deserialize_key<'a, K, V>() -> impl FnMut((PsbtKey, V)) -> (Result<K, DeserializeError>, V)
+where
+    K: PsbtValue,
+{
+    |(ref key, value)| (K::deserialize(&mut Cursor::new(&key.key)), value)
+}
+
+pub fn deserialize_value<'a, K, V>() -> impl FnMut((K, &'a Vec<u8>)) -> (K, Result<V, DeserializeError>)
+where
+    V: PsbtValue,
+{
+    |(key, value)| (key, V::deserialize(&mut Cursor::new(&value)))
+}
+
+pub fn map_kv_results<K, V, E>() -> impl FnMut((Result<K, E>, Result<V, E>)) -> Result<(K, V), E> {
+    |tup| match tup {
+        (Ok(k), Ok(v)) => { Ok((k, v)) },
+        (Err(e), _) => { Err(e) },
+        (_, Err(e)) => { Err(e) },
     }
 }
 
-impl<'a, K: PsbtValue, V: PsbtValue> Iterator for ProprietaryKeyIterator<'a, K, V>
-    where (K, V): ProprietaryKeyConvertible
+/*
+pub fn filter_agg_pk<'a>(agg_pk: &'a XOnlyPublicKey) -> impl FnMut(
 {
-    type Item = Result<(K, V), DeserializeError>;
+}
+*/
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
+pub fn filter_deserialize_key<'a, I, K>(iter: I, key_type: PsbtKeyType)
+    -> impl Iterator<Item=Result<(K, &'a Vec<u8>), DeserializeError>>
+where
+    I: Iterator<Item=&'a (PsbtKey, Vec<u8>)>,
+    K: PsbtValue,
+{
+    iter.filter_map(move |(ref key, ref value)| {
+        if key.type_value != key_type {
             return None;
         }
 
-        loop {
-            match self.keys.next() {
-                Some((key, value)) => {
-                    if key.prefix == self.prefix &&
-                       key.subtype == self.subtype {
-                        let result_key = match K::deserialize(&mut Cursor::new(&key.key)) {
-                            Ok(k) => k,
-                            Err(e) => { return Some(Err(e)) },
-                        };
-
-                        let result_value = match V::deserialize(&mut Cursor::new(value)) {
-                            Ok(k) => k,
-                            Err(e) => { return Some(Err(e)) },
-                        };
-
-                        return Some(Ok((result_key, result_value)));
-                    }
-                },
-                None => {
-                    self.done = true;
-                    return None;
-                },
-            }
+        match K::deserialize(&mut Cursor::new(&key.key)) {
+            Ok(k) => { Some(Ok((k, value))) },
+            Err(e) => { Some(Err(e)) },
         }
-    }
+    })
+}
+
+pub fn get_participating_by_agg_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+where
+    F: FnMut(&XOnlyPublicKey) -> bool,
+{
+    input.unknown.iter()
+        .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
+        .map(deserialize_key())
+        .filter(|(ref key_result, ref _value)|
+            match key_result {
+                Err(_e) => { false },
+                Ok(ref found_agg_pk) => { f(found_agg_pk) }
+            }
+        )
+        .map(deserialize_value())
+        .map(map_kv_results())
+        .collect::<Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>>>()
+}
+
+pub fn get_participating_by_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+where
+    F: FnMut(&Vec<PublicKey>) -> bool,
+{
+    input.unknown.iter()
+        .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
+        .map(deserialize_key())
+        .map(deserialize_value())
+        .filter(|(ref _key_result, ref value_result)|
+            match value_result {
+                Err(_e) => { false },
+                Ok(VariableLengthArray(ref pks)) => { f(pks) }
+            }
+        )
+        .map(map_kv_results())
+        .collect::<Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>>>()
+}
+
+pub fn deserialize<'a, I, K, V>(iter: I)
+    -> impl Iterator<Item=Result<(K, V), DeserializeError>> + 'a
+where
+    I: Iterator<Item=Result<(K, &'a Vec<u8>), DeserializeError>> + 'a,
+    V: PsbtValue,
+{
+    iter.map(|item| {
+        let (key, ref value_bytes) = item?;
+
+        match V::deserialize(&mut Cursor::new(value_bytes)) {
+            Ok(value) => { Ok((key, value)) },
+            Err(e) => { Err(e) },
+        }
+    })
 }

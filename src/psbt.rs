@@ -6,15 +6,14 @@ use bitcoin::{
 
 use bitcoin::psbt::{
     Input as PsbtInput,
-    raw::ProprietaryType,
     PsbtSighashType,
 };
 
 use bitcoin::secp256k1::{
     PublicKey,
-    Signing,
     Secp256k1,
     Verification,
+    XOnlyPublicKey,
 };
 
 use bitcoin::util::sighash::{
@@ -28,6 +27,7 @@ use bitcoin::util::schnorr::{
 
 use bitcoin::util::taproot::{
     TapBranchHash,
+    //TapLeafHash,
     TapSighashHash,
     TapTweakHash,
 };
@@ -59,10 +59,28 @@ use crate::{
 };
 
 use crate::serialize::{
-    ProprietaryKeyIterator,
-    ProprietaryKeyConvertible,
+    deserialize_key,
+    deserialize_value,
+    filter_key_type,
+    //filter_deserialize,
+    map_kv_results,
+    PsbtKeyValue,
     PsbtValue,
     ToPsbtKeyValue,
+    //PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS,
+    //PSBT_IN_MUSIG2_PUB_NONCE,
+    //PSBT_IN_MUSIG_PARTIAL_SIG,
+
+    //VariableLengthArray,
+
+    ParticipantPubkeysKey,
+    ParticipantPubkeysValue,
+
+    //PublicNonceKey,
+    //PublicNonceValue,
+
+    //PartialSignatureKey,
+    //PartialSignatureValue,
 };
 
 use std::collections::{
@@ -180,7 +198,6 @@ pub fn taproot_keyspend_sighash(psbt: &PartiallySignedTransaction, input_index: 
 /// Initial context for aggregating keys
 pub struct KeyAggregateContext<'a, C: ZkpVerification + ZkpSigning> {
     secp: &'a ZkpSecp256k1<C>,
-    prefix: Vec<u8>,
     pubkey: ZkpPublicKey,
 }
 
@@ -335,14 +352,14 @@ impl<'a, C: ZkpSigning> Updater<'a, C> {
 }
 
 impl<'a, C: ZkpVerification + ZkpSigning> KeyAggregateContext<'a, C> {
-    pub fn new(secp: &'a ZkpSecp256k1<C>, pubkey: ZkpPublicKey, prefix: Vec<u8>) -> Self {
+    pub fn new(secp: &'a ZkpSecp256k1<C>, pubkey: ZkpPublicKey) -> Self {
         KeyAggregateContext {
             secp,
-            prefix,
             pubkey,
         }
     }
 
+    /*
     /// Aggregate pubkeys from a psbt input in preparation for signing
     pub fn keyspend_aggregate(&'a self, psbt: &PartiallySignedTransaction, input_index: usize) -> Result<KeyspendContext<'a, C>, AggregateError> {
         let input = psbt.inputs
@@ -352,7 +369,7 @@ impl<'a, C: ZkpVerification + ZkpSigning> KeyAggregateContext<'a, C> {
         let psbt_inner_pk = input.tap_internal_key
             .ok_or(AggregateError::MissingInnerPubkey)?;
 
-        let participants = InputParticipants::from_input_keyspend(input, &self.prefix)
+        let participants = InputParticipants::from_input(input, &self.prefix)
             .map_err(|e|
                 match e {
                     ParticipantError::NoParticipantsError => {
@@ -393,6 +410,7 @@ impl<'a, C: ZkpVerification + ZkpSigning> KeyAggregateContext<'a, C> {
             inner_agg_pk,
         })
     }
+    */
 }
 
 #[derive(Clone,PartialEq)]
@@ -401,6 +419,7 @@ struct InputParticipants {
 }
 
 pub enum ParticipantError {
+    MissingParticipantsKey,
     NoParticipantsError,
     DuplicateParticipantError,
     DeserializeError,
@@ -417,35 +436,50 @@ impl InputParticipants {
         Self { participants }
     }
 
-    pub fn from_input_keyspend(input: &PsbtInput, proprietary_prefix: &Vec<u8>) -> Result<Self, ParticipantError> {
-        let iter = input.iter_proprietary::<ParticipantIndex, PublicKey>(proprietary_prefix);
+    /*
+    pub fn find_participants_by_agg_pk(input: &Psbt
 
-        let mut key_participants = iter
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| ParticipantError::DeserializeError)?;
-        key_participants.sort_by_key(|x| x.0);
+    pub fn from_input(input: &PsbtInput, agg_pk: &XOnlyPublicKey) -> Result<Self, ParticipantError> {
+    }
 
-        if key_participants.is_empty() {
+    pub fn from_input_from_agg_pk(input: &PsbtInput, agg_pk: &XOnlyPublicKey) -> Result<Self, ParticipantError> {
+        let mut participants_keys = input.unknown.iter()
+            .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
+            .map(deserialize_key())
+            .filter(|(ref key_result, ref _value)|
+                match key_result {
+                    Err(_e) => { false },
+                    Ok(ref found_agg_pk) => { found_agg_pk == agg_pk }
+                }
+            )
+            .map(deserialize_value())
+            .map(map_kv_results())
+            .collect::<Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>>>()
+            .map_err(|e| ParticipantError::DeserializeError)?;
+
+        let &(_agg_pk, VariableLengthArray(participants)) = participants_keys.get(0)
+            .ok_or(ParticipantError::MissingParticipantsKey)?;
+
+        if participants.len() > 1 {
+            unreachable!("duplicate participants key");
+        }
+
+        if participants.is_empty() {
             return Err(ParticipantError::NoParticipantsError);
         }
 
         let mut seen_keys: BTreeSet<PublicKey> = BTreeSet::new();
-        for (_i, key) in key_participants.iter() {
+        for (_i, key) in participants.iter() {
             if !seen_keys.insert(*key) {
                 return Err(ParticipantError::DuplicateParticipantError);
             }
         }
 
-        Ok(Self {
-            participants: key_participants
-                .iter()
-                .map(|&(_i, key)| key)
-                .collect(),
-        })
+        Ok(Self { participants })
     }
 
-    pub fn matches(&self, input: &PsbtInput, proprietary_prefix: &Vec<u8>) -> Result<(), ParticipantMatchError> {
-        match Self::from_input_keyspend(input, proprietary_prefix) {
+    pub fn matches(&self, input: &PsbtInput) -> Result<(), ParticipantMatchError> {
+        match Self::from_input(input) {
             Err(ParticipantError::DeserializeError) => { Err(ParticipantMatchError::DeserializeError) },
             Err(ParticipantError::NoParticipantsError) => { Err(ParticipantMatchError::NoParticipantsError) },
             Err(_) => {
@@ -460,6 +494,7 @@ impl InputParticipants {
             },
         }
     }
+    */
 
     pub fn iter(&self) -> impl Iterator<Item = &PublicKey> {
         self.participants.iter()
@@ -558,6 +593,8 @@ impl<'a, C: ZkpVerification + ZkpSigning> KeyspendContext<'a, C> {
         let input = psbt.inputs.get(input_index)
             .ok_or(NonceGenerateError::InvalidInputIndexError)?;
 
+        // FIXME:
+        /*
         let participants_validation_result = self.participants.matches(input, &self.prefix)
             .map_err(|e| match e {
                 ParticipantMatchError::DeserializeError => {
@@ -577,6 +614,7 @@ impl<'a, C: ZkpVerification + ZkpSigning> KeyspendContext<'a, C> {
                 if self.absent_participants_valid => Ok(()),
             Err(e) => Err(e),
         }?;
+        */
 
         let sighash = taproot_keyspend_sighash(psbt, input_index)
             .map_err(|e| NonceGenerateError::SighashError(e))?;
@@ -613,11 +651,11 @@ impl<'a, C: ZkpVerification + ZkpSigning> KeyspendContext<'a, C> {
             .get_mut(input_index)
             .ok_or(NonceGenerateError::InvalidInputIndexError)?;
 
-        let (key, value) = (self.pubkey.from_zkp(), context.pubnonce).to_psbt(&prefix)
+        let (key, value) = (self.pubkey.from_zkp(), context.pubnonce).to_psbt()
             .map_err(|_| NonceGenerateError::SerializeError)?;
 
         // FIXME: handle case where key is already present, is that an error?
-        input.proprietary
+        input.unknown
             .insert(key, value);
 
         Ok(context)
@@ -659,6 +697,8 @@ impl<'a, C: ZkpVerification + ZkpSigning> KeyspendSignContext<'a, C> {
             .get(input_index)
             .ok_or(SignError::InvalidInputIndexError)?;
 
+        // FIXME:
+        /*
         let participants_validation_result = self.participants.matches(input, &self.prefix)
             .map_err(|e| match e {
                 ParticipantMatchError::DeserializeError => {
@@ -678,6 +718,7 @@ impl<'a, C: ZkpVerification + ZkpSigning> KeyspendSignContext<'a, C> {
                 if self.absent_participants_valid => Ok(()),
             Err(e) => Err(e),
         }?;
+        */
 
         let psbt_inner_pk = input.tap_internal_key
             .ok_or(SignError::MissingInnerPubkey)?;
@@ -686,6 +727,7 @@ impl<'a, C: ZkpVerification + ZkpSigning> KeyspendSignContext<'a, C> {
             return Err(SignError::AggregateKeyMismatch);
         }
 
+        unimplemented!();
         let nonce_map = input.iter_proprietary::<PublicKey, MusigPubNonce>(&self.prefix)
             .collect::<Result<BTreeMap<_, _>, _>>()
             .map_err(|_| SignError::DeserializeError)?;
@@ -741,10 +783,10 @@ impl<'a, C: ZkpVerification + ZkpSigning> KeyspendSignContext<'a, C> {
             .get_mut(input_index)
             .ok_or(SignError::InvalidInputIndexError)?;
 
-        let (key, value) = (pubkey, partial_signature).to_psbt(&prefix)
+        let (key, value) = (pubkey, partial_signature).to_psbt()
             .map_err(|_| SignError::SerializeError)?;
 
-        input.proprietary
+        input.unknown
             .insert(key, value);
 
         Ok(agg_context)
@@ -870,34 +912,29 @@ pub enum AddItemError {
 pub trait PsbtInputHelper {
 
     /// Add a proprietary key/value pair
-    fn add_proprietary_item<K: PsbtValue, V: PsbtValue> (&mut self, prefix: &ProprietaryPrefix, key: K, value: V) -> Result<(), AddItemError>
-        where (K, V): ProprietaryKeyConvertible;
+    fn add_item<K: PsbtValue, V: PsbtValue> (&mut self, key: K, value: V) -> Result<(), AddItemError>
+        where (K, V): PsbtKeyValue;
 
     fn add_participant(&mut self, prefix: &ProprietaryPrefix, index: ParticipantIndex, pubkey: &PublicKey) -> Result<(), AddItemError> {
-        self.add_proprietary_item(prefix, index, pubkey.to_owned())
+        self.add_item(index, pubkey.to_owned())
     }
 
-    fn add_nonce(&mut self, prefix: &ProprietaryPrefix, pubkey: &PublicKey, nonce: &MusigPubNonce) -> Result<(), AddItemError> {
-        self.add_proprietary_item(prefix, pubkey.to_owned(), nonce.to_owned())
+    fn add_nonce(&mut self, pubkey: &PublicKey, nonce: &MusigPubNonce) -> Result<(), AddItemError> {
+        self.add_item(pubkey.to_owned(), nonce.to_owned())
     }
 
-    fn add_partial_signature(&mut self, prefix: &ProprietaryPrefix, pubkey: &PublicKey, sig: &MusigPartialSignature) -> Result<(), AddItemError> {
-        self.add_proprietary_item(prefix, pubkey.to_owned(), sig.to_owned())
+    fn add_partial_signature(&mut self, pubkey: &PublicKey, sig: &MusigPartialSignature) -> Result<(), AddItemError> {
+        self.add_item(pubkey.to_owned(), sig.to_owned())
     }
-
-    /// Iterate over proprietary keys of a certain type in this psbt input
-    fn iter_proprietary<'a, K: PsbtValue, V: PsbtValue>(&'a self, prefix: &'a ProprietaryPrefix) -> ProprietaryKeyIterator<'a, K, V>
-        where (K, V): ProprietaryKeyConvertible;
-
 }
 
 /// Extra functionality for psbt input proprietary key/value pairs
 impl PsbtInputHelper for PsbtInput {
 
-    fn add_proprietary_item<K: PsbtValue, V: PsbtValue>(&mut self, prefix: &ProprietaryPrefix, key: K, value: V) -> Result<(), AddItemError>
-        where (K, V): ProprietaryKeyConvertible
+    fn add_item<K: PsbtValue, V: PsbtValue>(&mut self, key: K, value: V) -> Result<(), AddItemError>
+        where (K, V): PsbtKeyValue
     {
-        let (ser_key, ser_value) = (key, value).to_psbt(prefix)
+        let (ser_key, ser_value) = (key, value).to_psbt()
             .map_err(|_| AddItemError::SerializeError)?;
 
         // FIXME: handle case where key is already present, is that an error? Probably not, since
@@ -905,16 +942,9 @@ impl PsbtInputHelper for PsbtInput {
         // party could remove this key to give the appearance it is not present.
         // The signer cannot rely on the psbt to contain data containing state.
         // Out of scope but maybe the psbt *could* contain a required, authenticated, encrypted chunk of data, which could contain such information.
-        self.proprietary
-            .insert(ser_key, ser_value);
+        self.unknown
+            .insert((<(K, V) as PsbtKeyValue>::KEY_TYPE, ser_key), ser_value);
 
         Ok(())
-    }
-
-    fn iter_proprietary<'a, K: PsbtValue, V: PsbtValue>(&'a self, prefix: &'a ProprietaryPrefix) -> ProprietaryKeyIterator<'a, K, V>
-        where (K, V): ProprietaryKeyConvertible {
-
-        let protype = <(K, V) as ProprietaryKeyConvertible>::SUBTYPE;
-        ProprietaryKeyIterator::<'a, K, V>::new(self.proprietary.iter(), &prefix[..], protype as ProprietaryType)
     }
 }
