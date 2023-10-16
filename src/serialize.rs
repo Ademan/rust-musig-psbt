@@ -137,6 +137,10 @@ trait KnownSize {
     const SIZE: usize;
 }
 
+impl KnownSize for PublicKey {
+    const SIZE: usize = PUBLIC_KEY_SIZE;
+}
+
 impl<T> PsbtValue for Option<T>
     where
         T: PsbtValue + KnownSize,
@@ -509,18 +513,19 @@ pub fn filter_key_type<'a>(key_type: PsbtKeyType) -> impl FnMut(&(&PsbtKey, &Vec
     move |&(key, _value)| { key.type_value == key_type }
 }
 
-pub fn deserialize_key<'a, K, V>() -> impl FnMut((PsbtKey, V)) -> (Result<K, DeserializeError>, V)
+pub fn deserialize_key<'a, K, V>() -> impl FnMut((&'a PsbtKey, &'a V)) -> (Result<K, DeserializeError>, &'a V)
 where
     K: PsbtValue,
 {
-    |(ref key, value)| (K::deserialize(&mut Cursor::new(&key.key)), value)
+    //|item: (&K, &'a V)| -> (Result<K, DeserializeError>, &'a V) {
+    |(key, value)| (K::deserialize(&mut Cursor::new(&key.key)), value)
 }
 
-pub fn deserialize_value<'a, K, V>() -> impl FnMut((K, &'a Vec<u8>)) -> (K, Result<V, DeserializeError>)
+pub fn deserialize_value<'a, K, V>() -> impl FnMut((&'a K, &'a Vec<u8>)) -> (&'a K, Result<V, DeserializeError>)
 where
     V: PsbtValue,
 {
-    |(key, value)| (key, V::deserialize(&mut Cursor::new(&value)))
+    |(key, value)| (key, V::deserialize(&mut Cursor::new(&value[..])))
 }
 
 pub fn map_kv_results<K, V, E>() -> impl FnMut((Result<K, E>, Result<V, E>)) -> Result<(K, V), E> {
@@ -570,7 +575,7 @@ where
         )
         .map(deserialize_value())
         .map(map_kv_results())
-        .collect::<Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>>>()
+        .collect::<Result<Vec<_>, _>>()
 }
 
 pub fn get_participating_by_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
@@ -579,16 +584,16 @@ where
 {
     input.unknown.iter()
         .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
-        .map(deserialize_key())
         .map(deserialize_value())
-        .filter(|(ref _key_result, ref value_result)|
+        .filter(|(ref key, ref value_result)|
             match value_result {
                 Err(_e) => { false },
                 Ok(VariableLengthArray(ref pks)) => { f(pks) }
             }
         )
+        .map(deserialize_key())
         .map(map_kv_results())
-        .collect::<Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>>>()
+        .collect::<Result<Vec<_>, _>>()
 }
 
 pub fn deserialize<'a, I, K, V>(iter: I)

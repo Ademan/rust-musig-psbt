@@ -13,7 +13,7 @@ use bitcoin::secp256k1::{
     PublicKey,
     Secp256k1,
     Verification,
-    XOnlyPublicKey,
+    //XOnlyPublicKey,
 };
 
 use bitcoin::util::sighash::{
@@ -72,6 +72,9 @@ use crate::serialize::{
     //PSBT_IN_MUSIG_PARTIAL_SIG,
 
     //VariableLengthArray,
+    
+    get_participating_by_pk,
+    get_participating_by_agg_pk,
 
     ParticipantPubkeysKey,
     ParticipantPubkeysValue,
@@ -942,8 +945,9 @@ impl PsbtInputHelper for PsbtInput {
         // party could remove this key to give the appearance it is not present.
         // The signer cannot rely on the psbt to contain data containing state.
         // Out of scope but maybe the psbt *could* contain a required, authenticated, encrypted chunk of data, which could contain such information.
+
         self.unknown
-            .insert((<(K, V) as PsbtKeyValue>::KEY_TYPE, ser_key), ser_value);
+            .insert(ser_key, ser_value);
 
         Ok(())
     }
