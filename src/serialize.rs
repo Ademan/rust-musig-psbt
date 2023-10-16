@@ -167,7 +167,7 @@ impl<T> PsbtValue for Option<T>
     }
 }
 
-pub struct VariableLengthArray<T>(pub Vec<T>);
+struct VariableLengthArray<T>(pub Vec<T>);
 
 impl<T> PsbtValue for VariableLengthArray<T>
     where
@@ -385,14 +385,44 @@ impl PsbtValue for KeySource {
 
 pub type ParticipantPubkeysKey = XOnlyPublicKey;
 pub type ParticipantPubkeysValue = VariableLengthArray<PublicKey>;
+pub type ParticipantPubkeysKeyValue = (ParticipantPubkeysKey, ParticipantPubkeysValue);
 
 type SigningDataKey = (PublicKey, XOnlyPublicKey, Option<TapLeafHash>);
 
 pub type PublicNonceKey = SigningDataKey;
 pub type PublicNonceValue = MusigPubNonce;
+pub type PublicNonceKeyValue = (PublicNonceKey, PublicNonceValue);
 
 pub type PartialSignatureKey = SigningDataKey;
 pub type PartialSignatureValue = MusigPartialSignature;
+pub type PartialSignatureKeyValue = (PartialSignatureKey, PartialSignatureValue);
+
+pub trait PsbtKeyValue {
+    const KEY_TYPE: PsbtKeyType;
+}
+
+impl PsbtKeyValue for ParticipantPubkeysKeyValue {
+    const KEY_TYPE: PsbtKeyType = PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS;
+}
+
+impl PsbtKeyValue for PublicNonceKeyValue {
+    const KEY_TYPE: PsbtKeyType = PSBT_IN_MUSIG2_PUB_NONCE;
+}
+impl PsbtKeyValue for PartialSignatureKeyValue {
+    const KEY_TYPE: PsbtKeyType = PSBT_IN_MUSIG_PARTIAL_SIG;
+}
+
+impl PsbtKeyValue for (ParticipantIndex, PublicKey) {
+    const KEY_TYPE: PsbtKeyType = MusigProprietaryKeySubtype::KeyspendParticipant as PsbtKeyType;
+}
+
+impl PsbtKeyValue for (PublicKey, MusigPubNonce) {
+    const KEY_TYPE: PsbtKeyType = MusigProprietaryKeySubtype::KeyspendPublicNonce as PsbtKeyType;
+}
+
+impl PsbtKeyValue for (PublicKey, MusigPartialSignature) {
+    const KEY_TYPE: PsbtKeyType = MusigProprietaryKeySubtype::KeyspendPartialSignature as PsbtKeyType;
+}
 
 struct Derivation {
     pub master_fingerprint: [u8; 4],
@@ -458,21 +488,6 @@ pub trait FromPsbtKeyValue: Sized {
     fn from_psbt(key: &PsbtKey, value: &Vec<u8>) -> Result<Self, DeserializeError>;
 }
 
-pub trait PsbtKeyValue {
-    const KEY_TYPE: MusigProprietaryKeySubtype;
-}
-
-impl PsbtKeyValue for (ParticipantIndex, PublicKey) {
-    const KEY_TYPE: MusigProprietaryKeySubtype = MusigProprietaryKeySubtype::KeyspendParticipant;
-}
-
-impl PsbtKeyValue for (PublicKey, MusigPubNonce) {
-    const KEY_TYPE: MusigProprietaryKeySubtype = MusigProprietaryKeySubtype::KeyspendPublicNonce;
-}
-
-impl PsbtKeyValue for (PublicKey, MusigPartialSignature) {
-    const KEY_TYPE: MusigProprietaryKeySubtype = MusigProprietaryKeySubtype::KeyspendPartialSignature;
-}
 
 impl<K: PsbtValue, V: PsbtValue> ToPsbtKeyValue for (K, V)
     where (K, V): PsbtKeyValue
@@ -617,4 +632,50 @@ where
             Err(e) => { Err(e) },
         }
     })
+}
+
+#[derive(Debug)]
+pub enum AddItemError {
+    SerializeError,
+    DuplicateKeyError,
+}
+
+/// Extra functionality for psbt input proprietary key/value pairs
+pub trait PsbtInputHelper {
+    /// Add a proprietary key/value pair
+    fn add_item<K: PsbtValue, V: PsbtValue> (&mut self, key: K, value: V) -> Result<(), AddItemError>
+        where (K, V): PsbtKeyValue;
+
+    fn add_participants(&mut self, agg_pk: &XOnlyPublicKey, pubkeys: &[PublicKey]) -> Result<(), AddItemError> {
+        self.add_item(agg_pk.to_owned(), VariableLengthArray(pubkeys.to_vec()))
+    }
+
+    fn add_nonce(&mut self, pubkey: &PublicKey, nonce: &MusigPubNonce) -> Result<(), AddItemError> {
+        self.add_item(pubkey.to_owned(), nonce.to_owned())
+    }
+
+    fn add_partial_signature(&mut self, pubkey: &PublicKey, sig: &MusigPartialSignature) -> Result<(), AddItemError> {
+        self.add_item(pubkey.to_owned(), sig.to_owned())
+    }
+}
+
+/// Extra functionality for psbt input proprietary key/value pairs
+impl PsbtInputHelper for PsbtInput {
+    fn add_item<K: PsbtValue, V: PsbtValue>(&mut self, key: K, value: V) -> Result<(), AddItemError>
+        where (K, V): PsbtKeyValue
+    {
+        let (ser_key, ser_value) = (key, value).to_psbt()
+            .map_err(|_| AddItemError::SerializeError)?;
+
+        // FIXME: handle case where key is already present, is that an error? Probably not, since
+        // any third party tampering could add a conflicting key to trigger an error, and any third
+        // party could remove this key to give the appearance it is not present.
+        // The signer cannot rely on the psbt to contain data containing state.
+        // Out of scope but maybe the psbt *could* contain a required, authenticated, encrypted chunk of data, which could contain such information.
+
+        self.unknown
+            .insert(ser_key, ser_value);
+
+        Ok(())
+    }
 }

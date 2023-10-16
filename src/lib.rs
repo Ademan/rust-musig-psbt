@@ -58,7 +58,6 @@ pub use crate::psbt::{
     KeyspendSignatureAggregationContext,
     NonceGenerateError,
     ParticipantIndex,
-    PsbtInputHelper,
     SignError,
     SignatureAggregateError,
     SpendInfoAddResult,
@@ -239,7 +238,6 @@ mod tests {
         MusigSecNonce,
         MusigSessionId,
         ParticipantIndex,
-        PsbtInputHelper,
         ToZkp,
         ZkpSecp256k1,
     };

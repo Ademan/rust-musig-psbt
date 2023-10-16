@@ -62,28 +62,12 @@ use crate::serialize::{
     deserialize_key,
     deserialize_value,
     filter_key_type,
-    //filter_deserialize,
     map_kv_results,
     PsbtKeyValue,
     PsbtValue,
     ToPsbtKeyValue,
-    //PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS,
-    //PSBT_IN_MUSIG2_PUB_NONCE,
-    //PSBT_IN_MUSIG_PARTIAL_SIG,
 
-    //VariableLengthArray,
-    
-    get_participating_by_pk,
-    get_participating_by_agg_pk,
-
-    ParticipantPubkeysKey,
-    ParticipantPubkeysValue,
-
-    //PublicNonceKey,
-    //PublicNonceValue,
-
-    //PartialSignatureKey,
-    //PartialSignatureValue,
+    PsbtInputHelper,
 };
 
 use std::collections::{
@@ -905,50 +889,3 @@ impl<'a, C: ZkpVerification + ZkpSigning> KeyspendSignatureAggregationContext<'a
     }
 }
 
-#[derive(Debug)]
-pub enum AddItemError {
-    SerializeError,
-    DuplicateKeyError,
-}
-
-/// Extra functionality for psbt input proprietary key/value pairs
-pub trait PsbtInputHelper {
-
-    /// Add a proprietary key/value pair
-    fn add_item<K: PsbtValue, V: PsbtValue> (&mut self, key: K, value: V) -> Result<(), AddItemError>
-        where (K, V): PsbtKeyValue;
-
-    fn add_participant(&mut self, prefix: &ProprietaryPrefix, index: ParticipantIndex, pubkey: &PublicKey) -> Result<(), AddItemError> {
-        self.add_item(index, pubkey.to_owned())
-    }
-
-    fn add_nonce(&mut self, pubkey: &PublicKey, nonce: &MusigPubNonce) -> Result<(), AddItemError> {
-        self.add_item(pubkey.to_owned(), nonce.to_owned())
-    }
-
-    fn add_partial_signature(&mut self, pubkey: &PublicKey, sig: &MusigPartialSignature) -> Result<(), AddItemError> {
-        self.add_item(pubkey.to_owned(), sig.to_owned())
-    }
-}
-
-/// Extra functionality for psbt input proprietary key/value pairs
-impl PsbtInputHelper for PsbtInput {
-
-    fn add_item<K: PsbtValue, V: PsbtValue>(&mut self, key: K, value: V) -> Result<(), AddItemError>
-        where (K, V): PsbtKeyValue
-    {
-        let (ser_key, ser_value) = (key, value).to_psbt()
-            .map_err(|_| AddItemError::SerializeError)?;
-
-        // FIXME: handle case where key is already present, is that an error? Probably not, since
-        // any third party tampering could add a conflicting key to trigger an error, and any third
-        // party could remove this key to give the appearance it is not present.
-        // The signer cannot rely on the psbt to contain data containing state.
-        // Out of scope but maybe the psbt *could* contain a required, authenticated, encrypted chunk of data, which could contain such information.
-
-        self.unknown
-            .insert(ser_key, ser_value);
-
-        Ok(())
-    }
-}
