@@ -513,15 +513,22 @@ pub fn filter_key_type<'a>(key_type: PsbtKeyType) -> impl FnMut(&(&PsbtKey, &Vec
     move |&(key, _value)| { key.type_value == key_type }
 }
 
-pub fn deserialize_key<'a, K, V>() -> impl FnMut((&'a PsbtKey, &'a V)) -> (Result<K, DeserializeError>, &'a V)
+pub fn deserialize_key<'a, K, V>() -> impl FnMut((&PsbtKey, &'a V)) -> (Result<K, DeserializeError>, &'a V)
 where
     K: PsbtValue,
 {
-    //|item: (&K, &'a V)| -> (Result<K, DeserializeError>, &'a V) {
     |(key, value)| (K::deserialize(&mut Cursor::new(&key.key)), value)
 }
 
-pub fn deserialize_value<'a, K, V>() -> impl FnMut((&'a K, &'a Vec<u8>)) -> (&'a K, Result<V, DeserializeError>)
+// FIXME: gross
+pub fn deserialize_key_second<K, V>() -> impl FnMut((&PsbtKey, V)) -> (Result<K, DeserializeError>, V)
+where
+    K: PsbtValue,
+{
+    |(key, value)| (K::deserialize(&mut Cursor::new(&key.key)), value)
+}
+
+pub fn deserialize_value<'a, K, V>() -> impl FnMut((K, &'a Vec<u8>)) -> (K, Result<V, DeserializeError>)
 where
     V: PsbtValue,
 {
@@ -591,7 +598,7 @@ where
                 Ok(VariableLengthArray(ref pks)) => { f(pks) }
             }
         )
-        .map(deserialize_key())
+        .map(deserialize_key_second())
         .map(map_kv_results())
         .collect::<Result<Vec<_>, _>>()
 }
