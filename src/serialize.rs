@@ -582,42 +582,6 @@ where
     })
 }
 
-pub fn get_participating_by_agg_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
-where
-    F: FnMut(&XOnlyPublicKey) -> bool,
-{
-    input.unknown.iter()
-        .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
-        .map(deserialize_key())
-        .filter(|(ref key_result, ref _value)|
-            match key_result {
-                Err(_e) => { false },
-                Ok(ref found_agg_pk) => { f(found_agg_pk) }
-            }
-        )
-        .map(deserialize_value())
-        .map(map_kv_results())
-        .collect::<Result<Vec<_>, _>>()
-}
-
-pub fn get_participating_by_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
-where
-    F: FnMut(&Vec<PublicKey>) -> bool,
-{
-    input.unknown.iter()
-        .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
-        .map(deserialize_value())
-        .filter(|(ref key, ref value_result)|
-            match value_result {
-                Err(_e) => { false },
-                Ok(VariableLengthArray(ref pks)) => { f(pks) }
-            }
-        )
-        .map(deserialize_key_second())
-        .map(map_kv_results())
-        .collect::<Result<Vec<_>, _>>()
-}
-
 pub fn deserialize<'a, I, K, V>(iter: I)
     -> impl Iterator<Item=Result<(K, V), DeserializeError>> + 'a
 where
@@ -642,6 +606,15 @@ pub enum AddItemError {
 
 /// Extra functionality for psbt input proprietary key/value pairs
 pub trait PsbtInputHelper {
+    // Make return collection generic? maybe just for fun/edification... later
+    fn get_participating_by_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+    where
+        F: FnMut(&Vec<PublicKey>) -> bool;
+
+    fn get_participating_by_agg_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+    where
+        F: FnMut(&XOnlyPublicKey) -> bool;
+
     /// Add a proprietary key/value pair
     fn add_item<K: PsbtValue, V: PsbtValue> (&mut self, key: K, value: V) -> Result<(), AddItemError>
         where (K, V): PsbtKeyValue;
@@ -661,6 +634,42 @@ pub trait PsbtInputHelper {
 
 /// Extra functionality for psbt input proprietary key/value pairs
 impl PsbtInputHelper for PsbtInput {
+    fn get_participating_by_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+    where
+        F: FnMut(&Vec<PublicKey>) -> bool,
+    {
+        input.unknown.iter()
+            .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
+            .map(deserialize_value())
+            .filter(|(ref key, ref value_result)|
+                match value_result {
+                    Err(_e) => { false },
+                    Ok(VariableLengthArray(ref pks)) => { f(pks) }
+                }
+            )
+            .map(deserialize_key_second())
+            .map(map_kv_results())
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    fn get_participating_by_agg_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+    where
+        F: FnMut(&XOnlyPublicKey) -> bool,
+    {
+        input.unknown.iter()
+            .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
+            .map(deserialize_key())
+            .filter(|(ref key_result, ref _value)|
+                match key_result {
+                    Err(_e) => { false },
+                    Ok(ref found_agg_pk) => { f(found_agg_pk) }
+                }
+            )
+            .map(deserialize_value())
+            .map(map_kv_results())
+            .collect::<Result<Vec<_>, _>>()
+    }
+
     fn add_item<K: PsbtValue, V: PsbtValue>(&mut self, key: K, value: V) -> Result<(), AddItemError>
         where (K, V): PsbtKeyValue
     {
