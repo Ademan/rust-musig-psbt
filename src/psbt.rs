@@ -197,6 +197,7 @@ pub enum CoreContextCreateError {
 }
 
 impl CoreContext {
+    //fn from_participants<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, 
     fn to_keyagg_cache<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: &Vec<PublicKey>) -> MusigKeyAggCache {
         let zkp_participant_pubkeys: Vec<ZkpPublicKey> = participant_pubkeys.iter()
             .map(|pk| pk.to_zkp())

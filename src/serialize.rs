@@ -10,8 +10,6 @@ use bitcoin::consensus::encode::{
 use bitcoin::psbt::{
     Input as PsbtInput,
     raw::Key as PsbtKey,
-    //raw::ProprietaryKey,
-    //raw::ProprietaryType,
 };
 
 use bitcoin::secp256k1::{
@@ -57,14 +55,28 @@ use crate::{
     psbt::ParticipantIndex,
 };
 
-// FIXME: psbt key types are actually var ints, once rust-bitcoin updates, update here
-pub type PsbtKeyType = u8;
-
 const MUSIG_PARTIAL_SIGNATURE_SERIALIZED_LEN: usize = 32;
 
 pub const PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS: u8 = 0x19;
 pub const PSBT_IN_MUSIG2_PUB_NONCE: u8 = 0x1a;
 pub const PSBT_IN_MUSIG_PARTIAL_SIG: u8 = 0x1b;
+
+// FIXME: psbt key types are actually var ints, once rust-bitcoin updates, update here
+pub type PsbtKeyType = u8;
+
+pub type ParticipantPubkeysKey = XOnlyPublicKey;
+pub type ParticipantPubkeysValue = VariableLengthArray<PublicKey>;
+pub type ParticipantPubkeysKeyValue = (ParticipantPubkeysKey, ParticipantPubkeysValue);
+
+type SigningDataKey = (PublicKey, XOnlyPublicKey, Option<TapLeafHash>);
+
+pub type PublicNonceKey = SigningDataKey;
+pub type PublicNonceValue = MusigPubNonce;
+pub type PublicNonceKeyValue = (PublicNonceKey, PublicNonceValue);
+
+pub type PartialSignatureKey = SigningDataKey;
+pub type PartialSignatureValue = MusigPartialSignature;
+pub type PartialSignatureKeyValue = (PartialSignatureKey, PartialSignatureValue);
 
 #[derive(Debug)]
 pub enum SerializeError {
@@ -388,20 +400,6 @@ impl PsbtValue for KeySource {
     }
 }
 
-pub type ParticipantPubkeysKey = XOnlyPublicKey;
-pub type ParticipantPubkeysValue = VariableLengthArray<PublicKey>;
-pub type ParticipantPubkeysKeyValue = (ParticipantPubkeysKey, ParticipantPubkeysValue);
-
-type SigningDataKey = (PublicKey, XOnlyPublicKey, Option<TapLeafHash>);
-
-pub type PublicNonceKey = SigningDataKey;
-pub type PublicNonceValue = MusigPubNonce;
-pub type PublicNonceKeyValue = (PublicNonceKey, PublicNonceValue);
-
-pub type PartialSignatureKey = SigningDataKey;
-pub type PartialSignatureValue = MusigPartialSignature;
-pub type PartialSignatureKeyValue = (PartialSignatureKey, PartialSignatureValue);
-
 pub trait PsbtKeyValue {
     const KEY_TYPE: PsbtKeyType;
 }
@@ -417,54 +415,9 @@ impl PsbtKeyValue for PartialSignatureKeyValue {
     const KEY_TYPE: PsbtKeyType = PSBT_IN_MUSIG_PARTIAL_SIG;
 }
 
-impl PsbtKeyValue for (ParticipantIndex, PublicKey) {
-    const KEY_TYPE: PsbtKeyType = MusigProprietaryKeySubtype::KeyspendParticipant as PsbtKeyType;
-}
-
-impl PsbtKeyValue for (PublicKey, MusigPubNonce) {
-    const KEY_TYPE: PsbtKeyType = MusigProprietaryKeySubtype::KeyspendPublicNonce as PsbtKeyType;
-}
-
-impl PsbtKeyValue for (PublicKey, MusigPartialSignature) {
-    const KEY_TYPE: PsbtKeyType = MusigProprietaryKeySubtype::KeyspendPartialSignature as PsbtKeyType;
-}
-
 struct Derivation {
     pub master_fingerprint: [u8; 4],
     pub path: Vec<u32>,
-}
-
-struct MusigPublicNonceKeypair {
-    pub index: ParticipantIndex,
-    pub pubnonce: MusigPubNonce,
-}
-
-struct MusigPartialSignatureKeypair {
-    pub pubkey: PublicKey,
-    pub pubnonce: MusigPartialSignature,
-}
-
-#[repr(u8)]
-pub enum MusigProprietaryKeySubtype {
-    KeyspendParticipant = PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS,
-    KeyspendPublicNonce = PSBT_IN_MUSIG2_PUB_NONCE,
-    KeyspendPartialSignature = PSBT_IN_MUSIG_PARTIAL_SIG,
-}
-
-impl TryFrom<u8> for MusigProprietaryKeySubtype {
-    type Error = ();
-
-    fn try_from(x: u8) -> Result<Self, Self::Error> {
-        if x == Self::KeyspendParticipant as u8 {
-            return Ok(Self::KeyspendParticipant);
-        } else if x == Self::KeyspendPublicNonce as u8 {
-            return Ok(Self::KeyspendPublicNonce);
-        } else if x == Self::KeyspendPartialSignature as u8 {
-            return Ok(Self::KeyspendPartialSignature);
-        } else {
-            return Err(());
-        }
-    }
 }
 
 fn read_all_or_nothing<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<Option<()>, IoError> {
@@ -492,7 +445,6 @@ pub trait ToPsbtKeyValue: Sized {
 pub trait FromPsbtKeyValue: Sized {
     fn from_psbt(key: &PsbtKey, value: &Vec<u8>) -> Result<Self, DeserializeError>;
 }
-
 
 impl<K: PsbtValue, V: PsbtValue> ToPsbtKeyValue for (K, V)
     where (K, V): PsbtKeyValue
@@ -562,12 +514,6 @@ pub fn map_kv_results<K, V, E>() -> impl FnMut((Result<K, E>, Result<V, E>)) -> 
         (_, Err(e)) => { Err(e) },
     }
 }
-
-/*
-pub fn filter_agg_pk<'a>(agg_pk: &'a XOnlyPublicKey) -> impl FnMut(
-{
-}
-*/
 
 pub fn filter_deserialize_key<'a, I, K>(iter: I, key_type: PsbtKeyType)
     -> impl Iterator<Item=Result<(K, &'a Vec<u8>), DeserializeError>>
@@ -672,20 +618,20 @@ pub trait PsbtInputHelper {
         Ok(result)
     }
 
-    /// Add a proprietary key/value pair
+    /// Serialize and add a key/value pair
     fn add_item<K: PsbtValue, V: PsbtValue> (&mut self, key: K, value: V) -> Result<(), AddItemError>
         where (K, V): PsbtKeyValue;
 
-    fn add_participants(&mut self, agg_pk: &XOnlyPublicKey, pubkeys: &[PublicKey]) -> Result<(), AddItemError> {
-        self.add_item(agg_pk.to_owned(), VariableLengthArray(pubkeys.to_vec()))
+    fn add_participants(&mut self, agg_pk: XOnlyPublicKey, pubkeys: &[PublicKey]) -> Result<(), AddItemError> {
+        self.add_item(agg_pk, VariableLengthArray(pubkeys.to_vec()))
     }
 
-    fn add_nonce(&mut self, pubkey: &PublicKey, nonce: &MusigPubNonce) -> Result<(), AddItemError> {
-        self.add_item(pubkey.to_owned(), nonce.to_owned())
+    fn add_nonce(&mut self, pubkey: PublicKey, agg_pk: XOnlyPublicKey, tap_leaf: Option<TapLeafHash>, nonce: MusigPubNonce) -> Result<(), AddItemError> {
+        self.add_item((pubkey, agg_pk, tap_leaf), nonce)
     }
 
-    fn add_partial_signature(&mut self, pubkey: &PublicKey, sig: &MusigPartialSignature) -> Result<(), AddItemError> {
-        self.add_item(pubkey.to_owned(), sig.to_owned())
+    fn add_partial_signature(&mut self, pubkey: PublicKey, agg_pk: XOnlyPublicKey, tap_leaf: Option<TapLeafHash>, sig: MusigPartialSignature) -> Result<(), AddItemError> {
+        self.add_item((pubkey, agg_pk, tap_leaf), sig)
     }
 }
 
