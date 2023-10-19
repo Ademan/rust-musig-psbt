@@ -64,6 +64,8 @@ pub const PSBT_IN_MUSIG_PARTIAL_SIG: u8 = 0x1b;
 // FIXME: psbt key types are actually var ints, once rust-bitcoin updates, update here
 pub type PsbtKeyType = u8;
 
+pub struct VariableLengthArray<T>(pub Vec<T>);
+
 pub type ParticipantPubkeysKey = XOnlyPublicKey;
 pub type ParticipantPubkeysValue = VariableLengthArray<PublicKey>;
 pub type ParticipantPubkeysKeyValue = (ParticipantPubkeysKey, ParticipantPubkeysValue);
@@ -183,8 +185,6 @@ impl<T> PsbtValue for Option<T>
         }
     }
 }
-
-struct VariableLengthArray<T>(pub Vec<T>);
 
 impl<T> PsbtValue for VariableLengthArray<T>
     where
@@ -556,13 +556,13 @@ pub enum AddItemError {
 }
 
 /// Extra functionality for psbt input proprietary key/value pairs
-pub trait PsbtInputHelper {
+pub trait MusigPsbtInputSerializer {
     // Make return collection generic? maybe just for fun/edification... later
-    fn get_participating_by_pk<F>(&self, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+    fn get_participating_by_pk<F>(&self, f: F) -> Result<Vec<ParticipantPubkeysKeyValue>, DeserializeError>
     where
         F: FnMut(&Vec<PublicKey>) -> bool;
 
-    fn get_participating_by_agg_pk<F>(&self, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+    fn get_participating_by_agg_pk<F>(&self, f: F) -> Result<Vec<ParticipantPubkeysKeyValue>, DeserializeError>
     where
         F: FnMut(&XOnlyPublicKey) -> bool;
 
@@ -636,8 +636,8 @@ pub trait PsbtInputHelper {
 }
 
 /// Extra functionality for psbt input proprietary key/value pairs
-impl PsbtInputHelper for PsbtInput {
-    fn get_participating_by_pk<F>(&self, mut f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+impl MusigPsbtInputSerializer for PsbtInput {
+    fn get_participating_by_pk<F>(&self, mut f: F) -> Result<Vec<ParticipantPubkeysKeyValue>, DeserializeError>
     where
         F: FnMut(&Vec<PublicKey>) -> bool,
     {
@@ -655,7 +655,7 @@ impl PsbtInputHelper for PsbtInput {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    fn get_participating_by_agg_pk<F>(&self, mut f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+    fn get_participating_by_agg_pk<F>(&self, mut f: F) -> Result<Vec<ParticipantPubkeysKeyValue>, DeserializeError>
     where
         F: FnMut(&XOnlyPublicKey) -> bool,
     {

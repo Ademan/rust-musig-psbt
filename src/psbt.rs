@@ -59,15 +59,10 @@ use crate::{
 };
 
 use crate::serialize::{
-    deserialize_key,
-    deserialize_value,
-    filter_key_type,
-    map_kv_results,
-    PsbtKeyValue,
-    PsbtValue,
+    ParticipantPubkeysKeyValue,
+    MusigPsbtInputSerializer,
     ToPsbtKeyValue,
-
-    PsbtInputHelper,
+    VariableLengthArray,
 };
 
 use std::collections::{
@@ -196,8 +191,41 @@ pub enum CoreContextCreateError {
     TweakError,
 }
 
+trait PsbtInputHelper {
+    fn is_keyspend_for(&self, pk: &XOnlyPublicKey) -> bool;
+}
+
+impl PsbtInputHelper for PsbtInput {
+    fn is_keyspend_for(&self, pk: &XOnlyPublicKey) -> bool {
+        self.tap_internal_key.as_ref() == Some(pk)
+    }
+}
+
 impl CoreContext {
-    //fn from_participants<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, 
+    fn from_psbt<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, (agg_pk, VariableLengthArray(participant_pubkeys)): ParticipantPubkeysKeyValue) -> Result<Vec<Self>, CoreContextCreateError> {
+        let mut result: Vec<Self> = Vec::new();
+
+        if input.is_keyspend_for(&agg_pk) {
+            let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
+
+
+            let (tweaked_agg_pk, inner_agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, input.tap_merkle_root)
+                .map_err(|_| CoreContextCreateError::TweakError)?;
+
+            result.push(CoreContext {
+                participant_pubkeys: participant_pubkeys.to_owned(),
+                keyagg_cache,
+                inner_agg_pk,
+                agg_pk: tweaked_agg_pk,
+                merkle_root: input.tap_merkle_root,
+                tap_leaf: None,
+            });
+
+        }
+
+        Ok(result)
+    }
+
     fn to_keyagg_cache<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: &Vec<PublicKey>) -> MusigKeyAggCache {
         let zkp_participant_pubkeys: Vec<ZkpPublicKey> = participant_pubkeys.iter()
             .map(|pk| pk.to_zkp())
@@ -313,6 +341,7 @@ impl<'a, C: ZkpVerification + ZkpSigning> NonceGenerateContext<'a, C> {
     }
 
     pub fn add_nonce(&'a self, psbt: &mut PartiallySignedTransaction, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a, C>, NonceGenerateError> {
+        let psbt_key = (self.pubkey.from_zkp(), self.core.agg_pk.from_zkp(), self.core.tap_leaf);
 
         let context = self.generate_nonce(psbt, input_index, session, extra_rand)?;
 
@@ -320,7 +349,7 @@ impl<'a, C: ZkpVerification + ZkpSigning> NonceGenerateContext<'a, C> {
             .get_mut(input_index)
             .ok_or(NonceGenerateError::InvalidInputIndexError)?;
 
-        let (key, value) = (self.pubkey.from_zkp(), context.pubnonce).to_psbt()
+        let (key, value) = (psbt_key, context.pubnonce).to_psbt()
             .map_err(|_| NonceGenerateError::SerializeError)?;
 
         // FIXME: handle case where key is already present, is that an error?
@@ -421,14 +450,15 @@ impl<'a, C: ZkpVerification + ZkpSigning> SignContext<'a, C> {
     }
 
     pub fn sign(self, privkey: &ZkpSecretKey, psbt: &mut PartiallySignedTransaction, input_index: usize) -> Result<SignatureAggregateContext<'a, C>, SignError> {
-        let pubkey = self.pubkey.from_zkp();
+        let psbt_key = (self.pubkey.from_zkp(), self.core.agg_pk.from_zkp(), self.core.tap_leaf);
+
         let (agg_context, partial_signature) = self.get_partial_signature(privkey, psbt, input_index)?;
 
         let input = psbt.inputs
             .get_mut(input_index)
             .ok_or(SignError::InvalidInputIndexError)?;
 
-        let (key, value) = (pubkey, partial_signature).to_psbt()
+        let (key, value) = (psbt_key, partial_signature).to_psbt()
             .map_err(|_| SignError::SerializeError)?;
 
         input.unknown
