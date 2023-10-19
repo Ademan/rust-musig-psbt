@@ -11,57 +11,10 @@ Caveat emptor! See Warning section.
 5. Be useful to third parties (after careful review)
 6. ~~(Potentially) seek standardization in a BIP (*lots* more work to be done, in terms of documentation and process development)~~ The author of this proposal is satisfied the draft bip is superior to this proposal.
 
-## PSBT Serialization
-
-### DEPRECATED
-
-This proposal should be considered deprecated, this section will be removed after the code is updated to reflect the [draft bip](https://github.com/achow101/bips/tree/musig2-psbt).
-
-### Overview
-- 3 proprietary Key/Value pairs
-- Suggested proprietary prefix: b"musig"
-
-### Key/Value pairs
-
-1. Participant (pubkey)
-  - Key: Index
-    32 bit little endian unsigned integer
-    Key so that sort will always produce a consistent arrangement of pubkeys, so long as the key is unique.
-  - Value: Pubkey
-    33 byte compressed public key of participant
-  - Validation:
-    - Complete set of participating pubkeys are required unless the protocol set up participants out-of-band
-    - If present, duplicate participants are invalid
-    - If present, all parties must validate they are listed as a participant
-    - If present in later steps, parties should validate that the list of participants is unchanged from the expected list
-    - Skipped or missing participant indices are valid
-    - If present, all parties must validate that the output public key being signed for matches the aggregate public key computed by aggregating the 
-      public keys in order of their index, with low indices coming before high indices
-2. Nonce
-  - Key: Pubkey
-    Compressed public key of participant
-  - Value: musig public nonce
-  - Validation: None
-3. Partial Signature
-  - Key: Pubkey
-    Compressed public key of participant
-  - Value: musig partial signature
-  - Validation:
-    Use musig algorithm to validate that this partial signature is a valid signature over this transaction for the given participant.
-
-### Design Notes
-
-- Participants are not stored in a single key/value pair with an array of participant pubkeys because it is simpler to remove the key/value pair for a participant, than to read, modify, write a single key/value pair.
-- Participant indices are the key to ensure a valid PSBT (containing no duplicate keys) always produces a consistent ordering of pubkeys and therefore a consistent aggregate public key
-- Pubkeys are the keys for Nonce and Partial Signature key/value pairs to eliminate duplicates and to make this proposal useful when the participant list and ordering
-  is communicated out of band.
-  - This justification may be weak, it only really serves the case where some peers coordinated the aggregate pubkey out of band, and some are relying purely on the PSBT to communicate this. Maybe this is relevant to hardware wallets?
-  - This is also the most unambiguous encoding in the author's opinion, regardless of anticipated scenarios.
+This repo is intended to implement the [draft bip](https://github.com/achow101/bips/tree/musig2-psbt).
 
 ### Open Questions
 
-- Should this proposal be generalized to other multiparty computation schemes like FROST?
-  - At present, the author thinks not. Generalizing would require careful thought and future proofing, significantly delaying this, which is useful as a simpler, limited approach.
 - Should nonces and partial signatures be authenticated to frustrate malicious tampering?
   - When a protocol needs to identify and evict offline or malicious peers from a signing, except in the case of a central coordinator, it is possible for a malicious peer to tamper with a third party's signing data to give the impression the third party is uncooperative.
   - This is mitigated by systems like nostr in which the whole PSBT would be signed, but this approach requires all peers to retrieve all other peers' entire PSBTs.
@@ -85,5 +38,6 @@ This is also the author's first rust project, you have been warned again.
 * Wildly insufficient tests
 * Zero third party review
 * Doesn't support taproot script spend (TODO)
-* In the rush to slap together this readme, code and documentation are almost certianly unaligned.
+* In the rush to slap together this readme, code and the draft bip are almost certianly unaligned.
 * `musig-cli` is not very useful at all, and won't be until PSBT v2 support lands in `rust-bitcoin`
+* Validation needs to be stepped back up

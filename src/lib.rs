@@ -49,13 +49,11 @@ use std::time::{
 };
 
 pub use crate::psbt::{
-    AggregateError,
-    CoreContext,
     CoreContextCreateError,
-    KeyAggregateContext,
-    KeyspendContext,
-    KeyspendSignContext,
-    KeyspendSignatureAggregationContext,
+    CoreContext,
+    NonceGenerateContext,
+    SignContext,
+    SignatureAggregateContext,
     NonceGenerateError,
     ParticipantIndex,
     SignError,
@@ -229,7 +227,6 @@ mod tests {
 
     use crate::{
         FromZkp,
-        KeyAggregateContext,
         Message,
         MusigAggNonce,
         MusigKeyAggCache,

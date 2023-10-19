@@ -37,7 +37,8 @@ use crate::{
 };
 
 use std::collections::{
-    btree_map::Iter as BTreeIter,
+    BTreeMap,
+    BTreeSet,
 };
 
 use std::io::{
@@ -141,6 +142,10 @@ impl KnownSize for PublicKey {
     const SIZE: usize = PUBLIC_KEY_SIZE;
 }
 
+impl KnownSize for TapLeafHash {
+    const SIZE: usize = 32;
+}
+
 impl<T> PsbtValue for Option<T>
     where
         T: PsbtValue + KnownSize,
@@ -161,8 +166,8 @@ impl<T> PsbtValue for Option<T>
 
         // XXX: Messy
         match result.map(|_| T::deserialize(&mut Cursor::new(&buf))) {
-        Some(x) => { Ok(Some(x?)) },
-        None => Ok(None)
+            Some(x) => { Ok(Some(x?)) },
+            None => Ok(None)
         }
     }
 }
@@ -607,13 +612,65 @@ pub enum AddItemError {
 /// Extra functionality for psbt input proprietary key/value pairs
 pub trait PsbtInputHelper {
     // Make return collection generic? maybe just for fun/edification... later
-    fn get_participating_by_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+    fn get_participating_by_pk<F>(&self, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
     where
         F: FnMut(&Vec<PublicKey>) -> bool;
 
-    fn get_participating_by_agg_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+    fn get_participating_by_agg_pk<F>(&self, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
     where
         F: FnMut(&XOnlyPublicKey) -> bool;
+
+    fn get_public_nonces<F>(&self, f: F) -> Result<Vec<(PublicKey, XOnlyPublicKey, Option<TapLeafHash>, MusigPubNonce)>, DeserializeError>
+    where
+        F: FnMut(&PublicKey, &XOnlyPublicKey, Option<&TapLeafHash>) -> bool;
+
+    fn get_public_nonces_for(&self, agg_pks: &BTreeSet<(XOnlyPublicKey, Option<TapLeafHash>)>) -> Result<BTreeMap<(XOnlyPublicKey, Option<TapLeafHash>), BTreeMap<PublicKey, MusigPubNonce>>, DeserializeError>
+    {
+        let matching = self.get_public_nonces(|_pk, agg_pk, tap_leaf_hash|
+            agg_pks.contains(&(agg_pk.to_owned(), tap_leaf_hash.map(|&x| x)))
+        )?;
+
+        let mut result: BTreeMap<(XOnlyPublicKey, Option<TapLeafHash>), BTreeMap<PublicKey, MusigPubNonce>> = BTreeMap::new();
+
+        for (pk, agg_pk, tap_leaf_hash, pubnonce) in matching.into_iter() {
+            if let Some(nonces) = result.get_mut(&(agg_pk, tap_leaf_hash)) {
+                nonces.insert(pk, pubnonce);
+            } else {
+                let mut nonces = BTreeMap::new();
+                nonces.insert(pk, pubnonce);
+
+                result.insert((agg_pk, tap_leaf_hash), nonces);
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn get_partial_signatures<F>(&self, f: F) -> Result<Vec<(PublicKey, XOnlyPublicKey, Option<TapLeafHash>, MusigPartialSignature)>, DeserializeError>
+    where
+        F: FnMut(&PublicKey, &XOnlyPublicKey, Option<&TapLeafHash>) -> bool;
+
+    fn get_partial_signatures_for(&self, agg_pks: &BTreeSet<(XOnlyPublicKey, Option<TapLeafHash>)>) -> Result<BTreeMap<(XOnlyPublicKey, Option<TapLeafHash>), BTreeMap<PublicKey, MusigPartialSignature>>, DeserializeError>
+    {
+        let matching = self.get_partial_signatures(|_pk, agg_pk, tap_leaf_hash|
+            agg_pks.contains(&(agg_pk.to_owned(), tap_leaf_hash.map(|&x| x)))
+        )?;
+
+        let mut result: BTreeMap<(XOnlyPublicKey, Option<TapLeafHash>), BTreeMap<PublicKey, MusigPartialSignature>> = BTreeMap::new();
+
+        for (pk, agg_pk, tap_leaf_hash, partial_sig) in matching.into_iter() {
+            if let Some(nonces) = result.get_mut(&(agg_pk, tap_leaf_hash)) {
+                nonces.insert(pk, partial_sig);
+            } else {
+                let mut nonces = BTreeMap::new();
+                nonces.insert(pk, partial_sig);
+
+                result.insert((agg_pk, tap_leaf_hash), nonces);
+            }
+        }
+
+        Ok(result)
+    }
 
     /// Add a proprietary key/value pair
     fn add_item<K: PsbtValue, V: PsbtValue> (&mut self, key: K, value: V) -> Result<(), AddItemError>
@@ -634,11 +691,11 @@ pub trait PsbtInputHelper {
 
 /// Extra functionality for psbt input proprietary key/value pairs
 impl PsbtInputHelper for PsbtInput {
-    fn get_participating_by_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+    fn get_participating_by_pk<F>(&self, mut f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
     where
         F: FnMut(&Vec<PublicKey>) -> bool,
     {
-        input.unknown.iter()
+        self.unknown.iter()
             .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
             .map(deserialize_value())
             .filter(|(ref key, ref value_result)|
@@ -652,11 +709,11 @@ impl PsbtInputHelper for PsbtInput {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    fn get_participating_by_agg_pk<F>(input: &PsbtInput, f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
+    fn get_participating_by_agg_pk<F>(&self, mut f: F) -> Result<Vec<(ParticipantPubkeysKey, ParticipantPubkeysValue)>, DeserializeError>
     where
         F: FnMut(&XOnlyPublicKey) -> bool,
     {
-        input.unknown.iter()
+        self.unknown.iter()
             .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
             .map(deserialize_key())
             .filter(|(ref key_result, ref _value)|
@@ -667,6 +724,56 @@ impl PsbtInputHelper for PsbtInput {
             )
             .map(deserialize_value())
             .map(map_kv_results())
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    fn get_public_nonces<F>(&self, mut f: F) -> Result<Vec<(PublicKey, XOnlyPublicKey, Option<TapLeafHash>, MusigPubNonce)>, DeserializeError>
+    where
+        F: FnMut(&PublicKey, &XOnlyPublicKey, Option<&TapLeafHash>) -> bool,
+    {
+        self.unknown.iter()
+            .filter(filter_key_type(PSBT_IN_MUSIG2_PUB_NONCE))
+            .map(deserialize_key::<PublicNonceKey, _>())
+            .filter(|(ref key_result, ref _value)|
+                match key_result {
+                    Err(_e) => { false },
+                    Ok((ref pubkey, ref found_agg_pk, ref tap_leaf_hash)) => {
+                        f(pubkey, found_agg_pk, tap_leaf_hash.as_ref())
+                    }
+                }
+            )
+            .map(deserialize_value())
+            .map(map_kv_results())
+            .map(|i|
+                i.map(|((pk, agg_pk, tap_leaf_hash), pub_nonce)|
+                    (pk, agg_pk, tap_leaf_hash, pub_nonce)
+                )
+             )
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    fn get_partial_signatures<F>(&self, mut f: F) -> Result<Vec<(PublicKey, XOnlyPublicKey, Option<TapLeafHash>, MusigPartialSignature)>, DeserializeError>
+    where
+        F: FnMut(&PublicKey, &XOnlyPublicKey, Option<&TapLeafHash>) -> bool,
+    {
+        self.unknown.iter()
+            .filter(filter_key_type(PSBT_IN_MUSIG_PARTIAL_SIG))
+            .map(deserialize_key::<PartialSignatureKey, _>())
+            .filter(|(ref key_result, ref _value)|
+                match key_result {
+                    Err(_e) => { false },
+                    Ok((ref pubkey, ref found_agg_pk, ref tap_leaf_hash)) => {
+                        f(pubkey, found_agg_pk, tap_leaf_hash.as_ref())
+                    }
+                }
+            )
+            .map(deserialize_value())
+            .map(map_kv_results())
+            .map(|i|
+                i.map(|((pk, agg_pk, tap_leaf_hash), partial_sig)|
+                    (pk, agg_pk, tap_leaf_hash, partial_sig)
+                )
+             )
             .collect::<Result<Vec<_>, _>>()
     }
 
