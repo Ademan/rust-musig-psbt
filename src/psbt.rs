@@ -202,26 +202,16 @@ impl PsbtInputHelper for PsbtInput {
 }
 
 impl CoreContext {
-    fn from_psbt<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, (agg_pk, VariableLengthArray(participant_pubkeys)): ParticipantPubkeysKeyValue) -> Result<Vec<Self>, CoreContextCreateError> {
+    fn from_psbt<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, psbt_keyvalue: &ParticipantPubkeysKeyValue) -> Result<Vec<Self>, CoreContextCreateError> {
+        let (agg_pk, VariableLengthArray(participant_pubkeys)) = psbt_keyvalue;
+
         let mut result: Vec<Self> = Vec::new();
 
-        if input.is_keyspend_for(&agg_pk) {
-            let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
-
-
-            let (tweaked_agg_pk, inner_agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, input.tap_merkle_root)
-                .map_err(|_| CoreContextCreateError::TweakError)?;
-
-            result.push(CoreContext {
-                participant_pubkeys: participant_pubkeys.to_owned(),
-                keyagg_cache,
-                inner_agg_pk,
-                agg_pk: tweaked_agg_pk,
-                merkle_root: input.tap_merkle_root,
-                tap_leaf: None,
-            });
-
+        if let Some(keyspend_context) = Self::new_keyspend(secp, input, psbt_keyvalue)? {
+            result.push(keyspend_context);
         }
+
+        // TODO: script path
 
         Ok(result)
     }
@@ -234,20 +224,25 @@ impl CoreContext {
         MusigKeyAggCache::new(secp, &zkp_participant_pubkeys[..])
     }
 
-    pub fn new_keyspend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: Option<TapBranchHash>) -> Result<Self, CoreContextCreateError> {
+    // TODO: allow derivation too
+    pub fn new_keyspend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, (agg_pk, VariableLengthArray(participant_pubkeys)): &ParticipantPubkeysKeyValue) -> Result<Option<Self>, CoreContextCreateError> {
+        if input.tap_internal_key.as_ref() != Some(&agg_pk) {
+            return Ok(None);
+        }
+
         let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
 
-        let (inner_agg_pk, agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, merkle_root)
+        let (tweaked_agg_pk, inner_agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, input.tap_merkle_root)
             .map_err(|_| CoreContextCreateError::TweakError)?;
 
-        Ok(CoreContext {
-            participant_pubkeys,
+        Ok(Some(CoreContext {
+            participant_pubkeys: participant_pubkeys.to_owned(),
             keyagg_cache,
             inner_agg_pk,
-            agg_pk,
-            merkle_root,
+            agg_pk: tweaked_agg_pk,
+            merkle_root: input.tap_merkle_root,
             tap_leaf: None,
-        })
+        }))
     }
 
     pub fn new_script_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: TapBranchHash, tap_leaf: TapLeafHash) -> Result<Self, CoreContextCreateError> {

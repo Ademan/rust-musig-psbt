@@ -10,6 +10,7 @@ use bitcoin::consensus::encode::{
 use bitcoin::psbt::{
     Input as PsbtInput,
     raw::Key as PsbtKey,
+    PartiallySignedTransaction,
 };
 
 use bitcoin::secp256k1::{
@@ -644,7 +645,7 @@ impl MusigPsbtInputSerializer for PsbtInput {
         self.unknown.iter()
             .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
             .map(deserialize_value())
-            .filter(|(ref key, ref value_result)|
+            .filter(|(ref _key, ref value_result)|
                 match value_result {
                     Err(_e) => { false },
                     Ok(VariableLengthArray(ref pks)) => { f(pks) }
@@ -739,5 +740,49 @@ impl MusigPsbtInputSerializer for PsbtInput {
             .insert(ser_key, ser_value);
 
         Ok(())
+    }
+}
+
+trait MusigPsbtSerializer {
+    fn get_participating_by_pk<F>(&self, f: F) -> Result<Vec<(usize, ParticipantPubkeysKeyValue)>, DeserializeError>
+    where
+        F: FnMut(&Vec<PublicKey>) -> bool;
+
+    fn get_participating_by_agg_pk<F>(&self, f: F) -> Result<Vec<(usize, ParticipantPubkeysKeyValue)>, DeserializeError>
+    where
+        F: FnMut(&XOnlyPublicKey) -> bool;
+}
+
+impl MusigPsbtSerializer for PartiallySignedTransaction {
+    fn get_participating_by_pk<'a, F>(&'a self, mut f: F) -> Result<Vec<(usize, ParticipantPubkeysKeyValue)>, DeserializeError>
+    where
+        F: FnMut(&Vec<PublicKey>) -> bool,
+    {
+        let mut result: Vec<(usize, ParticipantPubkeysKeyValue)> = Vec::new();
+
+        for (input_index, input) in self.inputs.iter().enumerate() {
+
+            for participating_kv in input.get_participating_by_pk(&mut f)?.into_iter() {
+                result.push((input_index, participating_kv));
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn get_participating_by_agg_pk<F>(&self, mut f: F) -> Result<Vec<(usize, ParticipantPubkeysKeyValue)>, DeserializeError>
+    where
+        F: FnMut(&XOnlyPublicKey) -> bool,
+    {
+        let mut result: Vec<(usize, ParticipantPubkeysKeyValue)> = Vec::new();
+
+        for (input_index, input) in self.inputs.iter().enumerate() {
+
+            for participating_kv in input.get_participating_by_agg_pk(&mut f)?.into_iter() {
+                result.push((input_index, participating_kv));
+            }
+        }
+
+        Ok(result)
     }
 }

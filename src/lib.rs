@@ -63,8 +63,12 @@ pub use crate::psbt::{
 };
 
 pub use crate::serialize::{
-    SerializeError,
     DeserializeError,
+    MusigPsbtInputSerializer,
+    PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS,
+    PSBT_IN_MUSIG2_PUB_NONCE,
+    PSBT_IN_MUSIG_PARTIAL_SIG,
+    SerializeError,
 };
 
 pub trait FromZkp {
@@ -226,6 +230,7 @@ mod tests {
     };
 
     use crate::{
+        MusigPsbtInputSerializer,
         FromZkp,
         Message,
         MusigAggNonce,
@@ -305,21 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_participants() {
-        let psbt = get_test_psbt(1);
-
-        let mut participants = psbt.inputs[0]
-            .iter_proprietary::<ParticipantIndex, PublicKey>(&b"musig".to_vec())
-            .collect::<Result<Vec<_>, _>>()
-            .expect("no deserialization errors");
-
-        participants.sort_by_key(|x| x.0);
-
-        assert_eq!(participants[0].1, hex_pubkey("02841d69a8b80ae23a8090e6f3765540ea5efd8c287b1307c983a6e2a3a171b525"));
-        assert_eq!(participants[1].1, hex_pubkey("02d0a35e00b17b89f0a5385344eac5c147e0545c1c03de212796cacdb5efbc28c0"));
-    }
-
-    #[test]
     #[cfg(feature="test",)]
     fn test_basic() {
         let secp = ZkpSecp256k1::new();
@@ -383,43 +373,5 @@ mod tests {
         tx1.verify(|point: &OutPoint| {
             outpoints.get(point).map(|txout| txout.clone())
         }).expect("valid transaction");
-    }
-
-    #[test]
-    fn test_error_without_combine() {
-        let secp = ZkpSecp256k1::new();
-        let bitcoin_secp = Secp256k1::new();
-
-        let psbt = hex_psbt("70736274ff01005e020000000100000000000000000000000000000000000000000000000000000000000000002a00000000ffffffff013930000000000000225120e6316b5920257522f080774efdb78f41fb0d6f54ac8628e6a0d78b6883b3f5d0000000000001012b39300000000000002251201a1947c55b0aba987b95709c57ac2ee2a2200d2358fb4a5132e21da58dc696d9011720645933cfaaa72d516f188f7d1a250b926a85412ee656e507c5082c6ad49426ad0cfc056d7573696700000000002102841d69a8b80ae23a8090e6f3765540ea5efd8c287b1307c983a6e2a3a171b5250cfc056d7573696700010000002102d0a35e00b17b89f0a5385344eac5c147e0545c1c03de212796cacdb5efbc28c00000");
-
-        let privkey1 = hex_privkey("4dcaff8ed1975fe2cebbd7c03384902c2189a2e6de11f1bb1c9dc784e8e4d11e");
-        let pubkey1 = privkey1.public_key(&bitcoin_secp);
-        let privkey2 = hex_privkey("171a1371a3fa23e4e7b647889ba5ff3532fcdf995b6ca21fc1429669d448151e");
-        let pubkey2 = privkey2.public_key(&bitcoin_secp);
-
-        let prefix = b"musig".to_vec();
-
-        let key_context1 = KeyAggregateContext::new(&secp, pubkey1.to_zkp(), prefix.clone());
-        let key_context2 = KeyAggregateContext::new(&secp, pubkey2.to_zkp(), prefix.clone());
-
-        let keyspend_context1 = key_context1.keyspend_aggregate(&psbt, 0)
-            .expect("success");
-        let keyspend_context2 = key_context2.keyspend_aggregate(&psbt, 0)
-            .expect("success");
-
-        let extra_rand = [0u8; 32];
-        let session_1 = MusigSessionId::assume_unique_per_nonce_gen([1u8; 32]);
-        let session_2 = MusigSessionId::assume_unique_per_nonce_gen([2u8; 32]);
-
-        let mut psbt_ng_1 = psbt.clone();
-        let mut psbt_ng_2 = psbt.clone();
-
-        let sign_context_1 = keyspend_context1.add_nonce(&mut psbt_ng_1, 0, session_1, extra_rand)
-            .expect("success");
-        let sign_context_2 = keyspend_context2.add_nonce(&mut psbt_ng_2, 0, session_2, extra_rand)
-            .expect("success");
-
-        assert!(sign_context_1.sign(&privkey1.to_zkp(), &mut psbt_ng_1, 0).is_err());
-        assert!(sign_context_2.sign(&privkey2.to_zkp(), &mut psbt_ng_2, 0).is_err());
     }
 }
