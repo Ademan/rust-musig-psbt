@@ -51,11 +51,11 @@ use std::time::{
 pub use crate::psbt::{
     CoreContextCreateError,
     CoreContext,
-    NonceGenerateContext,
     SignContext,
     SignatureAggregateContext,
     NonceGenerateError,
     ParticipantIndex,
+    PsbtHelper,
     SignError,
     SignatureAggregateError,
     SpendInfoAddResult,
@@ -242,6 +242,7 @@ mod tests {
         ParticipantIndex,
         ToZkp,
         ZkpSecp256k1,
+        PsbtHelper,
     };
 
     fn outpoint_map(psbt: &PartiallySignedTransaction) -> BTreeMap<OutPoint, TxOut> {
@@ -314,59 +315,48 @@ mod tests {
     fn test_basic() {
         let secp = ZkpSecp256k1::new();
 
-        let psbt = get_test_psbt(1);
+        let mut psbt = get_test_psbt(1);
 
         let PartyData { privkey: privkey1, pubkey: pubkey1 } = get_test_party(1);
         let PartyData { privkey: privkey2, pubkey: pubkey2 } = get_test_party(2);
 
-        let prefix = b"musig".to_vec();
+        let participating1 = psbt.get_participating_for_pk(&secp, &pubkey1).expect("results");
+        assert!(participating1.len() == 1);
 
-        let key_context1 = KeyAggregateContext::new(&secp, pubkey1.to_zkp(), prefix.clone());
-        let key_context2 = KeyAggregateContext::new(&secp, pubkey2.to_zkp(), prefix.clone());
+        let participating2 = psbt.get_participating_for_pk(&secp, &pubkey2).expect("results");
+        assert!(participating2.len() == 1);
 
-        let keyspend_context1 = key_context1.keyspend_aggregate(&psbt, 0)
-            .expect("success");
-        let keyspend_context2 = key_context2.keyspend_aggregate(&psbt, 0)
-            .expect("success");
+        let (ridx1, corectx1) = &participating1[0];
+        let (ridx2, corectx2) = &participating2[0];
+
+        // XXX: there's got to be a better way
+        // Should be able to deref in destructuring... right?
+        let (idx1, idx2) = (*ridx1, *ridx2);
 
         let extra_rand = [0u8; 32];
-        let session_1 = MusigSessionId::assume_unique_per_nonce_gen([1u8; 32]);
-        let session_2 = MusigSessionId::assume_unique_per_nonce_gen([2u8; 32]);
+        let session1 = MusigSessionId::assume_unique_per_nonce_gen([1u8; 32]);
+        let session2 = MusigSessionId::assume_unique_per_nonce_gen([2u8; 32]);
 
-        let mut psbt_ng_1 = psbt.clone();
-        let mut psbt_ng_2 = psbt.clone();
+        let signctx1 = corectx1.add_nonce(&secp, pubkey1, &mut psbt, idx1, session1, extra_rand).expect("success");
+        let signctx2 = corectx2.add_nonce(&secp, pubkey2, &mut psbt, idx2, session2, extra_rand).expect("success");
 
-        let sign_context_1 = keyspend_context1.add_nonce(&mut psbt_ng_1, 0, session_1, extra_rand)
+        let sigaggctx1 = signctx1.sign(&secp, &privkey1, &mut psbt, idx1)
+            .expect("sign success");
+        let sigaggctx2 = signctx2.sign(&secp, &privkey2, &mut psbt, idx2)
+            .expect("sign success");
+
+        let mut sigaggpsbt1 = psbt.clone();
+        let mut sigaggpsbt2 = psbt.clone();
+
+        sigaggctx1.aggregate_signatures(&secp, &mut sigaggpsbt1, idx1)
             .expect("success");
-        let sign_context_2 = keyspend_context2.add_nonce(&mut psbt_ng_2, 0, session_2, extra_rand)
-            .expect("success");
-
-        psbt_ng_1.combine(psbt_ng_2)
-            .expect("successful combine");
-
-        let mut psbt_combined_nonces_1 = psbt_ng_1.clone();
-        let mut psbt_combined_nonces_2 = psbt_ng_1.clone();
-
-        let sig_agg_context_1 = sign_context_1.sign(&privkey1.to_zkp(), &mut psbt_combined_nonces_1, 0)
-            .expect("success");
-        let sig_agg_context_2 = sign_context_2.sign(&privkey2.to_zkp(), &mut psbt_combined_nonces_2, 0)
+        sigaggctx2.aggregate_signatures(&secp, &mut sigaggpsbt2, idx2)
             .expect("success");
 
-        psbt_combined_nonces_1.combine(psbt_combined_nonces_2)
-            .expect("successful combine");
+        let outpoints = outpoint_map(&sigaggpsbt1);
 
-        let mut psbt_signed_1 = psbt_combined_nonces_1.clone();
-        let mut psbt_signed_2 = psbt_combined_nonces_1.clone();
-
-        sig_agg_context_1.aggregate_signatures(&mut psbt_signed_1, 0)
-            .expect("success");
-        sig_agg_context_2.aggregate_signatures(&mut psbt_signed_2, 0)
-            .expect("success");
-
-        let outpoints = outpoint_map(&psbt_signed_1);
-
-        let tx1 = psbt_signed_1.extract_tx();
-        let tx2 = psbt_signed_2.extract_tx();
+        let tx1 = sigaggpsbt1.extract_tx();
+        let tx2 = sigaggpsbt2.extract_tx();
 
         assert_eq!(tx1, tx2);
 

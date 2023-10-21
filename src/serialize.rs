@@ -534,22 +534,6 @@ where
     })
 }
 
-pub fn deserialize<'a, I, K, V>(iter: I)
-    -> impl Iterator<Item=Result<(K, V), DeserializeError>> + 'a
-where
-    I: Iterator<Item=Result<(K, &'a Vec<u8>), DeserializeError>> + 'a,
-    V: PsbtValue,
-{
-    iter.map(|item| {
-        let (key, ref value_bytes) = item?;
-
-        match V::deserialize(&mut Cursor::new(value_bytes)) {
-            Ok(value) => { Ok((key, value)) },
-            Err(e) => { Err(e) },
-        }
-    })
-}
-
 #[derive(Debug)]
 pub enum AddItemError {
     SerializeError,
@@ -743,46 +727,3 @@ impl MusigPsbtInputSerializer for PsbtInput {
     }
 }
 
-trait MusigPsbtSerializer {
-    fn get_participating_by_pk<F>(&self, f: F) -> Result<Vec<(usize, ParticipantPubkeysKeyValue)>, DeserializeError>
-    where
-        F: FnMut(&Vec<PublicKey>) -> bool;
-
-    fn get_participating_by_agg_pk<F>(&self, f: F) -> Result<Vec<(usize, ParticipantPubkeysKeyValue)>, DeserializeError>
-    where
-        F: FnMut(&XOnlyPublicKey) -> bool;
-}
-
-impl MusigPsbtSerializer for PartiallySignedTransaction {
-    fn get_participating_by_pk<'a, F>(&'a self, mut f: F) -> Result<Vec<(usize, ParticipantPubkeysKeyValue)>, DeserializeError>
-    where
-        F: FnMut(&Vec<PublicKey>) -> bool,
-    {
-        let mut result: Vec<(usize, ParticipantPubkeysKeyValue)> = Vec::new();
-
-        for (input_index, input) in self.inputs.iter().enumerate() {
-
-            for participating_kv in input.get_participating_by_pk(&mut f)?.into_iter() {
-                result.push((input_index, participating_kv));
-            }
-        }
-
-        Ok(result)
-    }
-
-    fn get_participating_by_agg_pk<F>(&self, mut f: F) -> Result<Vec<(usize, ParticipantPubkeysKeyValue)>, DeserializeError>
-    where
-        F: FnMut(&XOnlyPublicKey) -> bool,
-    {
-        let mut result: Vec<(usize, ParticipantPubkeysKeyValue)> = Vec::new();
-
-        for (input_index, input) in self.inputs.iter().enumerate() {
-
-            for participating_kv in input.get_participating_by_agg_pk(&mut f)?.into_iter() {
-                result.push((input_index, participating_kv));
-            }
-        }
-
-        Ok(result)
-    }
-}

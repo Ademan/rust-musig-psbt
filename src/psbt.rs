@@ -12,6 +12,7 @@ use bitcoin::psbt::{
 use bitcoin::secp256k1::{
     PublicKey,
     Secp256k1,
+    SecretKey,
     Verification,
 };
 
@@ -63,6 +64,7 @@ use crate::serialize::{
     MusigPsbtInputSerializer,
     ToPsbtKeyValue,
     VariableLengthArray,
+    DeserializeError,
 };
 
 use std::collections::{
@@ -188,21 +190,13 @@ pub struct CoreContext {
 
 #[derive(Debug)]
 pub enum CoreContextCreateError {
-    TweakError,
-}
-
-trait PsbtInputHelper {
-    fn is_keyspend_for(&self, pk: &XOnlyPublicKey) -> bool;
-}
-
-impl PsbtInputHelper for PsbtInput {
-    fn is_keyspend_for(&self, pk: &XOnlyPublicKey) -> bool {
-        self.tap_internal_key.as_ref() == Some(pk)
-    }
+    InvalidTweak,
+    InvalidInputIndex,
+    DeserializeError,
 }
 
 impl CoreContext {
-    fn from_psbt<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, psbt_keyvalue: &ParticipantPubkeysKeyValue) -> Result<Vec<Self>, CoreContextCreateError> {
+    pub fn from_psbt_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, psbt_keyvalue: &ParticipantPubkeysKeyValue) -> Result<Vec<Self>, CoreContextCreateError> {
         let (agg_pk, VariableLengthArray(participant_pubkeys)) = psbt_keyvalue;
 
         let mut result: Vec<Self> = Vec::new();
@@ -233,7 +227,7 @@ impl CoreContext {
         let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
 
         let (tweaked_agg_pk, inner_agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, input.tap_merkle_root)
-            .map_err(|_| CoreContextCreateError::TweakError)?;
+            .map_err(|_| CoreContextCreateError::InvalidTweak)?;
 
         Ok(Some(CoreContext {
             participant_pubkeys: participant_pubkeys.to_owned(),
@@ -282,63 +276,36 @@ impl CoreContext {
             merkle_root: self.merkle_root,
         }
     }
-}
 
-/// Context for generating nonces for signing
-pub struct NonceGenerateContext<'a, C: ZkpSigning> {
-    secp: &'a ZkpSecp256k1<C>,
-    core: &'a CoreContext,
-    pubkey: ZkpPublicKey,
-    // TODO: enable and use and rename struct
-    // tap_leaf: Option<TapBranchHash>,
-}
-
-#[derive(Debug)]
-pub enum NonceGenerateError {
-    NonceGenerateError,
-    SighashError(SighashError),
-    InvalidSighashError,
-    SerializeError,
-    DeserializeError,
-    UnexpectedParticipants,
-    InvalidInputIndexError,
-    ChangedParticipantsError,
-    NoParticipantsError,
-    PlaceholderError,
-}
-
-impl<'a, C: ZkpVerification + ZkpSigning> NonceGenerateContext<'a, C> {
-    /// Generate a nonce for signing
-    pub fn generate_nonce(&'a self, psbt: &PartiallySignedTransaction, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a, C>, NonceGenerateError> {
+    pub fn generate_nonce<'a, C: ZkpVerification + ZkpSigning>(&'a self, secp: &ZkpSecp256k1<C>, pubkey: PublicKey, psbt: &PartiallySignedTransaction, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a>, NonceGenerateError> {
         let input = psbt.inputs.get(input_index)
             .ok_or(NonceGenerateError::InvalidInputIndexError)?;
 
-        let sighash = taproot_sighash(psbt, input_index, self.core.tap_leaf)
+        let sighash = taproot_sighash(psbt, input_index, self.tap_leaf)
             .map_err(|e| NonceGenerateError::SighashError(e))?;
 
         let sighash_message = Message::from_slice(&sighash.into_inner())
             .map_err(|_| NonceGenerateError::InvalidSighashError)?;
 
-        let (secnonce, pubnonce) = self.core.keyagg_cache.nonce_gen(&self.secp, session,
-            self.pubkey,
+        let (secnonce, pubnonce) = self.keyagg_cache.nonce_gen(secp, session,
+            pubkey.to_zkp(),
             sighash_message,
             Some(extra_rand.clone())
         )
             .map_err(|_| NonceGenerateError::NonceGenerateError)?;
 
         Ok(SignContext {
-            secp: self.secp,
-            core: self.core,
-            pubkey: self.pubkey,
+            core: &self,
+            pubkey: pubkey.to_zkp(),
             secnonce,
             pubnonce,
         })
     }
 
-    pub fn add_nonce(&'a self, psbt: &mut PartiallySignedTransaction, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a, C>, NonceGenerateError> {
-        let psbt_key = (self.pubkey.from_zkp(), self.core.agg_pk.from_zkp(), self.core.tap_leaf);
+    pub fn add_nonce<'a, C: ZkpVerification + ZkpSigning>(&'a self, secp: &ZkpSecp256k1<C>, pubkey: PublicKey, psbt: &mut PartiallySignedTransaction, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a>, NonceGenerateError> {
+        let psbt_key = (pubkey, self.agg_pk.from_zkp(), self.tap_leaf);
 
-        let context = self.generate_nonce(psbt, input_index, session, extra_rand)?;
+        let context = self.generate_nonce(secp, pubkey, psbt, input_index, session, extra_rand)?;
 
         let input = psbt.inputs
             .get_mut(input_index)
@@ -355,9 +322,22 @@ impl<'a, C: ZkpVerification + ZkpSigning> NonceGenerateContext<'a, C> {
     }
 }
 
+#[derive(Debug)]
+pub enum NonceGenerateError {
+    NonceGenerateError,
+    SighashError(SighashError),
+    InvalidSighashError,
+    SerializeError,
+    DeserializeError,
+    UnexpectedParticipants,
+    InvalidInputIndexError,
+    ChangedParticipantsError,
+    NoParticipantsError,
+    PlaceholderError,
+}
+
 /// Context for creating a partial signature
-pub struct SignContext<'a, C: ZkpVerification + ZkpSigning> {
-    secp: &'a ZkpSecp256k1<C>,
+pub struct SignContext<'a> {
     core: &'a CoreContext,
     pubkey: ZkpPublicKey,
     secnonce: MusigSecNonce,
@@ -381,9 +361,9 @@ pub enum SignError {
     NoParticipantsError,
 }
 
-impl<'a, C: ZkpVerification + ZkpSigning> SignContext<'a, C> {
+impl<'a> SignContext<'a> {
     /// Calculate partial signature
-    pub fn get_partial_signature(self, privkey: &ZkpSecretKey, psbt: &PartiallySignedTransaction, input_index: usize) -> Result<(SignatureAggregateContext<'a, C>, MusigPartialSignature), SignError> {
+    pub fn get_partial_signature<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, privkey: &SecretKey, psbt: &PartiallySignedTransaction, input_index: usize) -> Result<(SignatureAggregateContext<'a>, MusigPartialSignature), SignError> {
         let input = psbt.inputs
             .get(input_index)
             .ok_or(SignError::InvalidInputIndexError)?;
@@ -404,9 +384,9 @@ impl<'a, C: ZkpVerification + ZkpSigning> SignContext<'a, C> {
              )
             .collect::<Result<Vec<MusigPubNonce>, _>>()?;
 
-        let key_pair = ZkpKeyPair::from_secret_key(self.secp, privkey);
+        let key_pair = ZkpKeyPair::from_secret_key(secp, &privkey.to_zkp());
 
-        let aggnonce = MusigAggNonce::new(self.secp, &sorted_nonces[..]);
+        let aggnonce = MusigAggNonce::new(secp, &sorted_nonces[..]);
 
         let sighash = taproot_sighash(psbt, input_index, self.core.tap_leaf)
             .map_err(|_| SignError::SighashError)?;
@@ -414,11 +394,11 @@ impl<'a, C: ZkpVerification + ZkpSigning> SignContext<'a, C> {
         let sighash_message = Message::from_slice(&sighash.into_inner())
             .map_err(|_| SignError::SighashError)?;
 
-        let session = MusigSession::new(&self.secp, &self.core.keyagg_cache, aggnonce, sighash_message);
+        let session = MusigSession::new(secp, &self.core.keyagg_cache, aggnonce, sighash_message);
 
         // FIXME: improve error specificity
         let partial_signature = session.partial_sign(
-            self.secp,
+            secp,
             self.secnonce,
             &key_pair,
             &self.core.keyagg_cache,
@@ -435,7 +415,6 @@ impl<'a, C: ZkpVerification + ZkpSigning> SignContext<'a, C> {
 
         Ok((
             SignatureAggregateContext {
-                secp: self.secp,
                 core: self.core,
                 session,
                 nonces: nonce_map,
@@ -444,10 +423,10 @@ impl<'a, C: ZkpVerification + ZkpSigning> SignContext<'a, C> {
         ))
     }
 
-    pub fn sign(self, privkey: &ZkpSecretKey, psbt: &mut PartiallySignedTransaction, input_index: usize) -> Result<SignatureAggregateContext<'a, C>, SignError> {
+    pub fn sign<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, privkey: &SecretKey, psbt: &mut PartiallySignedTransaction, input_index: usize) -> Result<SignatureAggregateContext<'a>, SignError> {
         let psbt_key = (self.pubkey.from_zkp(), self.core.agg_pk.from_zkp(), self.core.tap_leaf);
 
-        let (agg_context, partial_signature) = self.get_partial_signature(privkey, psbt, input_index)?;
+        let (agg_context, partial_signature) = self.get_partial_signature(secp, privkey, psbt, input_index)?;
 
         let input = psbt.inputs
             .get_mut(input_index)
@@ -463,8 +442,7 @@ impl<'a, C: ZkpVerification + ZkpSigning> SignContext<'a, C> {
     }
 }
 
-pub struct SignatureAggregateContext<'a, C: ZkpVerification + ZkpSigning> {
-    secp: &'a ZkpSecp256k1<C>,
+pub struct SignatureAggregateContext<'a> {
     core: &'a CoreContext,
     session: MusigSession,
     nonces: BTreeMap<PublicKey, MusigPubNonce>,
@@ -488,9 +466,9 @@ pub enum SignatureAggregateError {
     NoParticipantsError,
 }
 
-impl<'a, C: ZkpVerification + ZkpSigning> SignatureAggregateContext<'a, C> {
+impl<'a> SignatureAggregateContext<'a> {
     /// Validate and combine partial signatures, computing a final aggregate signature
-    pub fn get_aggregate_signature(self, psbt: &PartiallySignedTransaction, input_index: usize) -> Result<ZkpSchnorrSignature, SignatureAggregateError> {
+    pub fn get_aggregate_signature<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, psbt: &PartiallySignedTransaction, input_index: usize) -> Result<ZkpSchnorrSignature, SignatureAggregateError> {
         let input = psbt.inputs
             .get(input_index)
             .ok_or(SignatureAggregateError::InvalidInputIndexError)?;
@@ -503,14 +481,14 @@ impl<'a, C: ZkpVerification + ZkpSigning> SignatureAggregateContext<'a, C> {
         let partial_signatures = all_partial_signatures.get(&self.core.psbt_key())
             .ok_or(SignatureAggregateError::SignaturesMissingError)?;
 
-        let ordered_signatures = self.sort_and_validate_signatures(&partial_signatures)?;
+        let ordered_signatures = self.sort_and_validate_signatures(secp, &partial_signatures)?;
 
         Ok(self.session.partial_sig_agg(&ordered_signatures[..]))
     }
 
     /// Update a psbt input with a newly calculated aggregate signature
-    pub fn aggregate_signatures(self, psbt: &mut PartiallySignedTransaction, input_index: usize) -> Result<(), SignatureAggregateError> {
-        let signature = self.get_aggregate_signature(psbt, input_index)?;
+    pub fn aggregate_signatures<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, psbt: &mut PartiallySignedTransaction, input_index: usize) -> Result<(), SignatureAggregateError> {
+        let signature = self.get_aggregate_signature(secp, psbt, input_index)?;
 
         let input = psbt.inputs
             .get_mut(input_index)
@@ -528,13 +506,13 @@ impl<'a, C: ZkpVerification + ZkpSigning> SignatureAggregateContext<'a, C> {
         Ok(())
     }
 
-    fn sort_and_validate_signatures(&self, signatures: &BTreeMap<PublicKey, MusigPartialSignature>) -> Result<Vec<MusigPartialSignature>, SignatureAggregateError> {
+    fn sort_and_validate_signatures<C: ZkpSigning>(&self, secp: &ZkpSecp256k1<C>, signatures: &BTreeMap<PublicKey, MusigPartialSignature>) -> Result<Vec<MusigPartialSignature>, SignatureAggregateError> {
         self.nonces.iter()
             .map(|(pk, nonce)|
                 match signatures.get(pk) {
                     Some(&partial_signature) => {
                         if self.session.partial_verify(
-                            self.secp,
+                            secp,
                             &self.core.keyagg_cache,
                             partial_signature,
                             *nonce, pk.to_zkp()) {
@@ -616,9 +594,68 @@ impl<'a, C: ZkpSigning> Updater<'a, C> {
     }
 }
 
-pub enum ParticipantError {
-    MissingParticipantsKey,
-    NoParticipantsError,
-    DuplicateParticipantError,
-    DeserializeError,
+pub trait PsbtHelper {
+    fn get_participating_for_pk<C: ZkpVerification>(&self, secp: &ZkpSecp256k1<C>, target_pubkey: &PublicKey) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError> {
+        self.get_participating_by_pk(secp, |pks| {
+            pks.iter()
+                .any(|found_pubkey| found_pubkey == target_pubkey)
+        })
+    }
+
+    fn get_participating_for_agg_pk<C: ZkpVerification>(&self, secp: &ZkpSecp256k1<C>, target_agg_pk: &XOnlyPublicKey) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError> {
+        self.get_participating_by_agg_pk(secp, |found_agg_pk| {
+            found_agg_pk == target_agg_pk
+        })
+    }
+
+    fn get_participating_by_pk<C: ZkpVerification, F>(&self, secp: &ZkpSecp256k1<C>, f: F) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError>
+    where
+        F: FnMut(&Vec<PublicKey>) -> bool;
+
+    fn get_participating_by_agg_pk<C: ZkpVerification, F>(&self, secp: &ZkpSecp256k1<C>, f: F) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError>
+    where
+        F: FnMut(&XOnlyPublicKey) -> bool;
 }
+
+impl PsbtHelper for PartiallySignedTransaction {
+    fn get_participating_by_pk<C: ZkpVerification, F>(&self, secp: &ZkpSecp256k1<C>, mut f: F) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError>
+    where
+        F: FnMut(&Vec<PublicKey>) -> bool,
+    {
+        let mut result: Vec<(usize, CoreContext)> = Vec::new();
+
+        for (input_index, input) in self.inputs.iter().enumerate() {
+            let participating = input.get_participating_by_pk(&mut f)
+                .map_err(|_| CoreContextCreateError::DeserializeError)?;
+
+            for participating_kv in participating.into_iter() {
+                for ctx in CoreContext::from_psbt_input(secp, input, &participating_kv)?.into_iter() {
+                    result.push((input_index, ctx));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn get_participating_by_agg_pk<C: ZkpVerification, F>(&self, secp: &ZkpSecp256k1<C>, mut f: F) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError>
+    where
+        F: FnMut(&XOnlyPublicKey) -> bool,
+    {
+        let mut result: Vec<(usize, CoreContext)> = Vec::new();
+
+        for (input_index, input) in self.inputs.iter().enumerate() {
+            let participating = input.get_participating_by_agg_pk(&mut f)
+                .map_err(|_| CoreContextCreateError::DeserializeError)?;
+
+            for participating_kv in participating.into_iter() {
+                for ctx in CoreContext::from_psbt_input(secp, input, &participating_kv)?.into_iter() {
+                    result.push((input_index, ctx));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+}
+
