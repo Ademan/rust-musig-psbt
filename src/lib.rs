@@ -56,6 +56,7 @@ pub use crate::psbt::{
     NonceGenerateError,
     ParticipantIndex,
     PsbtHelper,
+    PsbtUpdater,
     SignError,
     SignatureAggregateError,
     SpendInfoAddResult,

@@ -333,36 +333,6 @@ impl CoreContext {
 
         Ok(context)
     }
-
-    pub fn add_spend_info<C2: Verification>(&self, secp: &Secp256k1<C2>, input: &mut PsbtInput) -> Result<SpendInfoAddResult, SpendInfoAddError> {
-        let utxo = input.witness_utxo
-            .as_ref()
-            .ok_or(SpendInfoAddError::WitnessUtxoMissing)?;
-
-        if utxo.script_pubkey != self.script_pubkey(secp) {
-            return Ok(SpendInfoAddResult::InputNoMatch);
-        }
-
-        let mut internal_key_modified = false;
-        let mut merkle_root_modified = false;
-
-        let tap_internal_key = Some(self.inner_agg_pk.from_zkp());
-
-        if input.tap_internal_key != tap_internal_key {
-            input.tap_internal_key = tap_internal_key;
-            internal_key_modified = true;
-        }
-
-        if input.tap_merkle_root != self.merkle_root {
-            input.tap_merkle_root = self.merkle_root;
-            merkle_root_modified = true;
-        }
-
-        Ok(SpendInfoAddResult::Success {
-            internal_key_modified,
-            merkle_root_modified,
-        })
-    }
 }
 
 #[derive(Debug)]
@@ -584,17 +554,22 @@ pub enum SpendInfoAddResult {
 
 #[derive(Debug)]
 pub enum SpendInfoAddError {
+    InvalidIndex,
     WitnessUtxoMissing,
+    NoScriptPubkey,
 }
 
 #[derive(Debug)]
 pub enum ParticipantsAddResult {
     InputNoMatch, // XXX: Should this be an error?
+    ParticipantsAdded,
 }
 
 #[derive(Debug)]
 pub enum ParticipantsAddError {
-    Error,
+    InvalidIndex,
+    SerializeError,
+    NoScriptPubkey,
 }
 
 pub trait PsbtHelper {
@@ -683,6 +658,95 @@ impl PsbtHelper for PartiallySignedTransaction {
         }
 
         Ok(result)
+    }
+}
+
+pub trait PsbtUpdater {
+    fn add_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext) -> Result<Vec<(usize, SpendInfoAddResult)>, SpendInfoAddError>;
+
+    fn add_input_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, index: usize) -> Result<SpendInfoAddResult, SpendInfoAddError>;
+
+    fn add_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext) -> Result<Vec<(usize, ParticipantsAddResult)>, ParticipantsAddError>;
+
+    fn add_input_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, index: usize) -> Result<ParticipantsAddResult, ParticipantsAddError>;
+}
+
+impl PsbtUpdater for PartiallySignedTransaction {
+    fn add_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext) -> Result<Vec<(usize, SpendInfoAddResult)>, SpendInfoAddError> {
+        let mut result: Vec<_> = Vec::new();
+        let input_len = self.inputs.len();
+
+        for index in 0..input_len {
+            let input_result = self.add_input_spend_info(secp, context, index)?;
+
+            result.push((index, input_result));
+        }
+
+        Ok(result)
+    }
+
+    fn add_input_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, index: usize) -> Result<SpendInfoAddResult, SpendInfoAddError> {
+        let script_pubkey = self.get_input_script_pubkey(index)
+            .ok_or(SpendInfoAddError::NoScriptPubkey)?
+            .clone();
+
+        let input = self.inputs.get_mut(index)
+            .ok_or(SpendInfoAddError::InvalidIndex)?;
+
+        if script_pubkey.clone() != context.script_pubkey(secp) {
+            return Ok(SpendInfoAddResult::InputNoMatch);
+        }
+
+        let mut internal_key_modified = false;
+        let mut merkle_root_modified = false;
+
+        let tap_internal_key = Some(context.inner_agg_pk.from_zkp());
+
+        if input.tap_internal_key != tap_internal_key {
+            input.tap_internal_key = tap_internal_key;
+            internal_key_modified = true;
+        }
+
+        if input.tap_merkle_root != context.merkle_root {
+            input.tap_merkle_root = context.merkle_root;
+            merkle_root_modified = true;
+        }
+
+        Ok(SpendInfoAddResult::Success {
+            internal_key_modified,
+            merkle_root_modified,
+        })
+    }
+
+    fn add_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext) -> Result<Vec<(usize, ParticipantsAddResult)>, ParticipantsAddError> {
+        let mut result: Vec<_> = Vec::new();
+        let input_len = self.inputs.len();
+
+        for index in 0..input_len {
+            let input_result = self.add_input_participants(secp, context, index)?;
+
+            result.push((index, input_result));
+        }
+
+        Ok(result)
+    }
+
+    fn add_input_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, index: usize) -> Result<ParticipantsAddResult, ParticipantsAddError> {
+        let script_pubkey = self.get_input_script_pubkey(index)
+            .ok_or(ParticipantsAddError::NoScriptPubkey)?
+            .clone();
+
+        let input = self.inputs.get_mut(index)
+            .ok_or(ParticipantsAddError::InvalidIndex)?;
+
+        if script_pubkey.clone() != context.script_pubkey(secp) {
+            return Ok(ParticipantsAddResult::InputNoMatch);
+        }
+
+        input.add_participants(context.inner_agg_pk.from_zkp(), context.participant_pubkeys.as_ref())
+            .map_err(|_| ParticipantsAddError::SerializeError)?;
+
+        Ok(ParticipantsAddResult::ParticipantsAdded)
     }
 }
 

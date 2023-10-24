@@ -61,6 +61,7 @@ use musig_psbt::{
     MusigSessionId,
     PartiallySignedTransaction,
     PsbtHelper,
+    PsbtUpdater,
     PublicKey,
     SecretKey,
     SpendInfoAddResult,
@@ -178,31 +179,17 @@ impl UpdateSubcommand {
 
         let core_context = CoreContext::new(&zkp_secp, self.keys.to_owned(), None, None).expect("core context creation success");
 
-        let updater = core_context.updater(&zkp_secp);
-
         let mut modified = false;
 
-        psbt.inputs.iter_mut()
-            .enumerate()
-            .for_each(|(i, input)|
-                match updater.add_spend_info(&secp, input) {
-                Ok(SpendInfoAddResult::Success{
-                    internal_key_modified: ikm,
-                    merkle_root_modified: mrm,
-                }) => {
-                    // FIXME: remove println
-                    println!("modified {i} internal key: {ikm}");
-                    println!("modified {i} merkle root: {mrm}");
-                    modified = modified || ikm || mrm;
-                },
-                // FIXME: remove println
-                Ok(SpendInfoAddResult::InputNoMatch) => { println!("no match {i}"); },
-                Err(e) => {
-                    // TODO
-                    println!("E: Input {i} {e:?}");
-                }
-                }
-            );
+        let add_spend_info_results = psbt.add_spend_info(&secp, &core_context)
+            .expect("spend info add success");
+
+        for (input_index, result) in add_spend_info_results.iter() {
+            if let SpendInfoAddResult::Success {internal_key_modified: ikm, merkle_root_modified: mrm} = result {
+                println!("modified {input_index} internal key: {ikm}");
+                println!("modified {input_index} merkle root: {mrm}");
+            }
+        }
 
         let mut psbt_out_file = OpenOptions::new()
             .write(true)
