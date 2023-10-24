@@ -60,6 +60,7 @@ use musig_psbt::{
     FromZkp,
     MusigSessionId,
     PartiallySignedTransaction,
+    ParticipantsAddResult,
     PsbtHelper,
     PsbtUpdater,
     PublicKey,
@@ -186,8 +187,22 @@ impl UpdateSubcommand {
 
         for (input_index, result) in add_spend_info_results.iter() {
             if let SpendInfoAddResult::Success {internal_key_modified: ikm, merkle_root_modified: mrm} = result {
-                println!("modified {input_index} internal key: {ikm}");
-                println!("modified {input_index} merkle root: {mrm}");
+                if *ikm {
+                    println!("Modified taproot internal key for input {input_index}");
+                }
+
+                if *mrm {
+                    println!("Modified taproot merkle root for input {input_index}");
+                }
+            }
+        }
+
+        let add_participants_results = psbt.add_participants(&secp, &core_context)
+            .expect("participants add success");
+
+        for (input_index, result) in add_participants_results.into_iter() {
+            if ParticipantsAddResult::ParticipantsAdded == result {
+                println!("Added parcitipants to input {input_index}");
             }
         }
 

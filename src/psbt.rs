@@ -543,35 +543,6 @@ impl<'a> SignatureAggregateContext<'a> {
     }
 }
 
-#[derive(Debug)]
-pub enum SpendInfoAddResult {
-    InputNoMatch, // XXX: Should this be an error?
-    Success {
-        internal_key_modified: bool,
-        merkle_root_modified: bool,
-    },
-}
-
-#[derive(Debug)]
-pub enum SpendInfoAddError {
-    InvalidIndex,
-    WitnessUtxoMissing,
-    NoScriptPubkey,
-}
-
-#[derive(Debug)]
-pub enum ParticipantsAddResult {
-    InputNoMatch, // XXX: Should this be an error?
-    ParticipantsAdded,
-}
-
-#[derive(Debug)]
-pub enum ParticipantsAddError {
-    InvalidIndex,
-    SerializeError,
-    NoScriptPubkey,
-}
-
 pub trait PsbtHelper {
     fn get_input_script_pubkey(&self, index: usize) -> Option<&Script>;
 
@@ -659,6 +630,35 @@ impl PsbtHelper for PartiallySignedTransaction {
 
         Ok(result)
     }
+}
+
+#[derive(Debug)]
+pub enum SpendInfoAddResult {
+    InputNoMatch, // XXX: Should this be an error?
+    Success {
+        internal_key_modified: bool,
+        merkle_root_modified: bool,
+    },
+}
+
+#[derive(Debug)]
+pub enum SpendInfoAddError {
+    InvalidIndex,
+    WitnessUtxoMissing,
+    NoScriptPubkey,
+}
+
+#[derive(PartialEq, Debug)]
+pub enum ParticipantsAddResult {
+    InputNoMatch, // XXX: Should this be an error?
+    ParticipantsAdded,
+}
+
+#[derive(Debug)]
+pub enum ParticipantsAddError {
+    InvalidIndex,
+    SerializeError,
+    NoScriptPubkey,
 }
 
 pub trait PsbtUpdater {
