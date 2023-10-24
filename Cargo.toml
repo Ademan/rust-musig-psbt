@@ -13,7 +13,7 @@ clap = { version = "4.2.7", features = [ "derive" ], optional = true }
 
 [features]
 default = [ ]
-test = [ "bitcoin/bitcoinconsensus" ]
+test = [ "dep:base64", "bitcoin/bitcoinconsensus" ]
 with-musig-cli = [ "dep:base64", "dep:clap", "secp256k1-zkp/rand-std" ]
 
 [[bin]]

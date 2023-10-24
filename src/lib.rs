@@ -198,9 +198,20 @@ mod tests {
     // There is a workaround but it has some minor drawbacks, so I'm simply alerting you early to
     // this requirement.
 
+    use base64::{
+        engine::general_purpose::STANDARD,
+        read::DecoderReader as Base64Reader,
+        write::EncoderWriter as Base64Writer,
+    };
+
     use bitcoin::{
         OutPoint,
         TxOut,
+    };
+
+    use bitcoin::consensus::encode::{
+        Decodable,
+        Encodable,
     };
 
     use bitcoin::secp256k1::{
@@ -230,16 +241,7 @@ mod tests {
     };
 
     use crate::{
-        MusigPsbtInputSerializer,
-        FromZkp,
-        Message,
-        MusigAggNonce,
-        MusigKeyAggCache,
-        MusigPartialSignature,
-        MusigPubNonce,
-        MusigSecNonce,
         MusigSessionId,
-        ParticipantIndex,
         ToZkp,
         ZkpSecp256k1,
         PsbtHelper,
@@ -299,10 +301,19 @@ mod tests {
         }
     }
 
+    fn b64_psbt(s: &str) -> PartiallySignedTransaction {
+        let mut reader = Base64Reader::new(s.as_bytes(), &STANDARD);
+
+        PartiallySignedTransaction::consensus_decode_from_finite_reader(&mut reader).expect("valid PSBT base64")
+    }
+
     fn get_test_psbt(i: usize) -> PartiallySignedTransaction {
         match i {
+            0 => {
+                return b64_psbt("cHNidP8BAFICAAAAAd0n6Ue88GoAyvS3s+K5S2stL3BwdVf+dwGGq1xRyi2HAAAAAAD9////ATyGAQAAAAAAFgAUIgoB0Q5jlXI3vIWjadirvITSd7QAAAAAAAEBK6CGAQAAAAAAIlEgcX50Lq8jZsQjpqvJKD7qBIgBU+B+NOE6ShDTptsR2lwAIgICMEGVnLA5ohZx859OOSXQGHUUsvvqPQ47HSKpI6+nBfkYG9JvMFQAAIABAACAAAAAgAAAAAANAAAAAA==");
+            },
             1 => {
-                return hex_psbt("70736274ff01005e020000000100000000000000000000000000000000000000000000000000000000000000002a00000000ffffffff013930000000000000225120e6316b5920257522f080774efdb78f41fb0d6f54ac8628e6a0d78b6883b3f5d0000000000001012b39300000000000002251201a1947c55b0aba987b95709c57ac2ee2a2200d2358fb4a5132e21da58dc696d9011720645933cfaaa72d516f188f7d1a250b926a85412ee656e507c5082c6ad49426ad0cfc056d7573696700000000002102841d69a8b80ae23a8090e6f3765540ea5efd8c287b1307c983a6e2a3a171b5250cfc056d7573696700010000002102d0a35e00b17b89f0a5385344eac5c147e0545c1c03de212796cacdb5efbc28c00000");
+                return b64_psbt("cHNidP8BAFICAAAAAd0n6Ue88GoAyvS3s+K5S2stL3BwdVf+dwGGq1xRyi2HAAAAAAD9////ATyGAQAAAAAAFgAUIgoB0Q5jlXI3vIWjadirvITSd7QAAAAAAAEBK6CGAQAAAAAAIlEgcX50Lq8jZsQjpqvJKD7qBIgBU+B+NOE6ShDTptsR2lwBFyBn3Wj/ueWc19QEdQHevj2Mz+p7VeaU0NX/uw6GruGA9gAiAgIwQZWcsDmiFnHzn045JdAYdRSy++o9DjsdIqkjr6cF+Rgb0m8wVAAAgAEAAIAAAACAAAAAAA0AAAAA");
             },
             _ => {
                 panic!("Invalid test psbt index {}", i);

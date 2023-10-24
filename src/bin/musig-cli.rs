@@ -45,7 +45,7 @@ use bitcoin::secp256k1::{
 
 use bitcoin::util::taproot::{
     TapBranchHash,
-    TapTweakHash,
+    TapLeafHash,
 };
 
 use clap::{
@@ -58,16 +58,13 @@ use musig_psbt::{
     CoreContext,
     ExtraRand,
     FromZkp,
-    KeyspendContext,
-    MusigAggNonce,
-    MusigKeyAggCache,
     MusigSessionId,
     PartiallySignedTransaction,
+    PsbtHelper,
     PublicKey,
     SecretKey,
     SpendInfoAddResult,
     ToZkp,
-    tweak_keyagg,
     ZkpAll,
     ZkpKeyPair,
     ZkpPublicKey,
@@ -157,8 +154,6 @@ struct UpdateSubcommand {
 
 impl UpdateSubcommand {
     fn run(&self, network: Network) {
-        let prefix = b"musig".to_vec();
-
         // TODO: relax and handle stdin/stdout instead
         let in_path = self.in_path.clone().expect("in path");
 
@@ -173,10 +168,6 @@ impl UpdateSubcommand {
         let secp = Secp256k1::new();
         let zkp_secp = ZkpSecp256k1::new();
 
-        let core_context = CoreContext::new(&zkp_secp, self.keys.to_owned()).expect("success");
-
-        let updater = core_context.updater(&zkp_secp);
-
         let mut in_psbt_file = OpenOptions::new()
             .read(true)
             .open(in_path)
@@ -184,6 +175,10 @@ impl UpdateSubcommand {
 
         let mut psbt = PartiallySignedTransaction::consensus_decode_from_finite_reader(&mut in_psbt_file)
             .expect("success decoding psbt");
+
+        let core_context = CoreContext::new(&zkp_secp, self.keys.to_owned(), None, None).expect("core context creation success");
+
+        let updater = core_context.updater(&zkp_secp);
 
         let mut modified = false;
 
@@ -232,25 +227,24 @@ impl AggregateSubcommand {
     fn run(&self, network: Network) {
         let secp = Secp256k1::new();
         let zkp_secp = ZkpSecp256k1::new();
-        let zkp_keys: Vec<ZkpPublicKey> = self.keys.iter().map(|k| k.to_zkp()).collect();
-        let mut keyagg_cache = MusigKeyAggCache::new(&zkp_secp, &zkp_keys[..]);
 
-        let tap_leaf: Option<TapBranchHash> = None;
+        let tap_leaf: Option<TapLeafHash> = None;
+        let merkle_root: Option<TapBranchHash> = None;
 
-        let (agg_pk, tweaked_agg_pk) = tweak_keyagg(&zkp_secp, &mut keyagg_cache, tap_leaf).expect("successful tweak");
+        let core_context = CoreContext::new(&zkp_secp, self.keys.to_owned(), merkle_root, tap_leaf).expect("core context creation success");
 
-        let pubkeys = [agg_pk, tweaked_agg_pk];
+        let pubkeys = [core_context.inner_agg_pk, core_context.agg_pk];
         let mut pubkey_selection = 1;
 
         let pubkey = if self.untweaked {
-            agg_pk
+            core_context.inner_agg_pk
         } else {
-            tweaked_agg_pk
+            core_context.agg_pk
         };
 
         let compressed_pk = pubkey.public_key(ZkpParity::Even);
 
-        let address = Address::p2tr(&secp, agg_pk.from_zkp(), tap_leaf, network);
+        let address = core_context.address(&secp, network);
 
         if self.show_pubkey && self.show_address && self.show_compressed_pubkey {
             println!("Aggregate Public Key: {}", compressed_pk);
@@ -278,31 +272,27 @@ impl SignSubcommand {
 
         let pubkey = privkey.public_key(&secp);
 
-        let prefix = b"musig".to_vec();
-
-        let keyspend_context = KeyspendContext::from_participant_pubkeys(&zkp_secp, prefix, pubkey, self.keys.to_owned(), None).expect("success");
+        //let keyspend_context = KeyspendContext::from_participant_pubkeys(&zkp_secp, prefix, pubkey, self.keys.to_owned(), None).expect("success");
 
         println!("Step 1. Base64 Encoded PSBT (initial): ");
 
         let mut aggregate_psbt = read_psbt();
 
-        let index_count = aggregate_psbt.unsigned_tx.input.len();
+        let participating = aggregate_psbt.get_participating_for_pk(&zkp_secp, &pubkey)
+            .expect("success getting participating");
 
-        assert!(index_count > 0);
+        let nonce_generate_contexts: Vec<_> = participating.iter()
+            .map(|(index, ctx)| {
+                println!("Signing index {index}");
+                let session = MusigSessionId::random();
 
-        println!("Signing for which index? 0 <= i < {}", index_count);
+                let extra = ExtraRand::tagged(b"musig/extra-rand").nanotime();
+                let sign_context = ctx.add_nonce(&zkp_secp, pubkey, &mut aggregate_psbt, *index, session, extra.into_bytes())
+                    .expect("add nonce success");
 
-        let mut line_in = String::new();
-        io::stdin().read_line(&mut line_in).expect("input");
-        let input_index: usize = line_in.trim().parse().expect("valid input index");
-
-        assert!(input_index < index_count);
-
-        let session = MusigSessionId::random();
-
-        let extra = ExtraRand::tagged(b"musig/extra-rand").nanotime();
-        let signing_context = keyspend_context.add_nonce(&mut aggregate_psbt, input_index, session, extra.into_bytes())
-            .expect("nonce generate success");
+                (index, sign_context)
+            })
+            .collect();
 
         println!("With nonce: ");
         write_psbt(&aggregate_psbt);
@@ -310,6 +300,13 @@ impl SignSubcommand {
 
         println!("Step 2. Base64 Encoded PSBT with all nonces (Step 1 complete for all participants):");
         let mut psbt_with_nonces = read_psbt();
+
+        unimplemented!();
+
+        /*
+        let aggregate_contexts = nonce_generate_contexts.into_iter()
+            .map(|(index, ctx)| {
+            })
 
         let sig_agg_context = signing_context.sign(&privkey.to_zkp(), &mut psbt_with_nonces, input_index).expect("signing success");
         println!("With (partial) signature: ");
@@ -324,6 +321,7 @@ impl SignSubcommand {
         println!("With signature: ");
         write_psbt(&psbt_with_partial_signatures);
         println!();
+        */
     }
 }
 
