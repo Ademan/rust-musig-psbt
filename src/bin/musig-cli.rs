@@ -290,7 +290,7 @@ impl SignSubcommand {
 
                 let extra = ExtraRand::tagged(b"musig/extra-rand").nanotime();
                 let sign_context = ctx.add_nonce(&zkp_secp, pubkey, &mut aggregate_psbt, *index, session, extra.into_bytes())
-                    .expect("add nonce success");
+                    .expect("add nonce");
 
                 (index, sign_context)
             })
@@ -303,14 +303,15 @@ impl SignSubcommand {
         println!("Step 2. Base64 Encoded PSBT with all nonces (Step 1 complete for all participants):");
         let mut psbt_with_nonces = read_psbt();
 
-        unimplemented!();
-
-        /*
-        let aggregate_contexts = nonce_generate_contexts.into_iter()
+        let aggregate_contexts: Vec<_> = nonce_generate_contexts.into_iter()
             .map(|(index, ctx)| {
-            })
+                let sigaggctx = ctx.sign(&zkp_secp, &privkey, &mut psbt_with_nonces, *index)
+                    .expect("sign");
 
-        let sig_agg_context = signing_context.sign(&privkey.to_zkp(), &mut psbt_with_nonces, input_index).expect("signing success");
+                (index, sigaggctx)
+            })
+            .collect();
+
         println!("With (partial) signature: ");
         write_psbt(&psbt_with_nonces);
         println!();
@@ -318,12 +319,15 @@ impl SignSubcommand {
         println!("Step 2. Base64 Encoded PSBT with all partial signatures (Step 2 complete for all participants):");
         let mut psbt_with_partial_signatures = read_psbt();
 
-        sig_agg_context.aggregate_signatures(&mut psbt_with_partial_signatures, input_index).expect("signing success"); 
+        aggregate_contexts.into_iter()
+            .for_each(|(index, ctx)| {
+                ctx.aggregate_signatures(&zkp_secp, &mut psbt_with_partial_signatures, *index)
+                    .expect("aggregate signatures");
+            });
 
         println!("With signature: ");
         write_psbt(&psbt_with_partial_signatures);
         println!();
-        */
     }
 }
 
