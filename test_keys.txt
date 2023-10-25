@@ -14,6 +14,13 @@ bdk-cli key derive --xprv tprv8ZgxMBicQKsPd1EzCPZcQSPhsotX5HvRDCivA7ASNQFmjWuTsW
   "xprv": "[c06177cc/86'/1'/0'/1/0]tprv8k7cKooc8X8e9wEhLGSoUhG4rUz7fYZsBtQ5KWMZhDvwwiTBRqkKYLxnFCnNtKRtnFgsuWyXq8zh5fGP57uCJYhgKqFtTpC6U1qZBy6fgM3/*",
   "xpub": "[c06177cc/86'/1'/0'/1/0]tpubDGoeUDqrGtpK3QGVDv7Pt6vBRWW3pskmmBzrc2Ps7VjLnChx4EZuiqaeRM8z85Ck438o4TdAq5Xj85GfRwNbgpxH9vRMvGR5nkrncGCdy6w/*"
 }
+bdk-cli key derive --xprv tprv8ZgxMBicQKsPd1EzCPZcQSPhsotX5HvRDCivA7ASNQFmjWuTsW3WWEwUNKFAZrnD9qpz55rtyLdphqkwRZUqNWYXwSEzd6P4pYvXGByRim3 --path 'm/86h/1h/0h/2/0'
+{
+  "priv": "02ed58011a5ab8fb93516bc66f7c57c0939c18d0137f3438ceee8fb9944bfbc0",
+  "pub": "02bebd7a1cef20283444b96e9ce78137e951ce48705390933896311a9abc75736a",
+  "xprv": "[c06177cc/86'/1'/0'/2/0]tprv8jZ2eZhcwtMvz1Rjvc9TnZ4stoQr7P4piRaDQHr8SH25abtizQ4qpfTTwdfNgU15NZsU755Q7XzHGxi1qsvkJztsPB1nhNi7frVQJxynJ67/*",
+  "xpub": "[c06177cc/86'/1'/0'/2/0]tpubDGF4nyjs6G3bsUTXpFp4BxizTpvnGiFjHjAzgotRrYpUR69VcntS1A5L7n2z5GJUikTjTAbgBAP66p29Z7jMgH7sATh59xoVRjmPRm1WT4H/*"
+}
 bdk-cli key derive --xprv tprv8ZgxMBicQKsPd1EzCPZcQSPhsotX5HvRDCivA7ASNQFmjWuTsW3WWEwUNKFAZrnD9qpz55rtyLdphqkwRZUqNWYXwSEzd6P4pYvXGByRim3 --path 'm/86h/1h/0h/3/0'
 {
   "priv": "ae7475e8c3a387738cc2ec8027aa41f91bb6dc4c42170ef1d212923f095a0f2a",

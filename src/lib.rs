@@ -253,17 +253,11 @@ mod tests {
         psbt.unsigned_tx.input
             .iter()
             .enumerate()
-            .filter_map(|(i, txin)|
-                if let Some(input) = psbt.inputs.get(i) {
-                    if let Some(ref txout) = input.witness_utxo {
-                        Some((txin.previous_output.clone(), txout.clone()))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            )
+            .filter_map(|(i, txin)| {
+                let input = psbt.inputs.get(i)?;
+                let txout = input.witness_utxo.as_ref()?;
+                Some((txin.previous_output.clone(), txout.clone()))
+            })
             .collect()
     }
 
@@ -288,10 +282,16 @@ mod tests {
     fn get_test_party(i: usize) -> PartyData {
         let secp = Secp256k1::new();
 
+        // I'd rather keep these keys hard coded for the test but they are derived as follows:
+        // tprv8ZgxMBicQKsPd1EzCPZcQSPhsotX5HvRDCivA7ASNQFmjWuTsW3WWEwUNKFAZrnD9qpz55rtyLdphqkwRZUqNWYXwSEzd6P4pYvXGByRim3/86'/1'/0'/i/0
+
         let privkey = match i {
-            1 => { hex_privkey("4dcaff8ed1975fe2cebbd7c03384902c2189a2e6de11f1bb1c9dc784e8e4d11e") },
-            2 => { hex_privkey("171a1371a3fa23e4e7b647889ba5ff3532fcdf995b6ca21fc1429669d448151e") },
+            0 => { hex_privkey("4dcaff8ed1975fe2cebbd7c03384902c2189a2e6de11f1bb1c9dc784e8e4d11e") },
+            1 => { hex_privkey("171a1371a3fa23e4e7b647889ba5ff3532fcdf995b6ca21fc1429669d448151e") },
+            2 => { hex_privkey("02ed58011a5ab8fb93516bc66f7c57c0939c18d0137f3438ceee8fb9944bfbc0") },
             3 => { hex_privkey("ae7475e8c3a387738cc2ec8027aa41f91bb6dc4c42170ef1d212923f095a0f2a") },
+            4 => { hex_privkey("71979b1aaee2900ca7aafe22bfc7beab263c9b6a31363157939b47d6b4c86b9e") },
+            5 => { hex_privkey("ad9938c3f23e4273391057cd079088bfff593a91a0d628951218baeee9511592") },
             _ => {
                 panic!("Invalid test party index {}", i);
             }
@@ -315,7 +315,7 @@ mod tests {
                 return b64_psbt("cHNidP8BAFICAAAAAd0n6Ue88GoAyvS3s+K5S2stL3BwdVf+dwGGq1xRyi2HAAAAAAD9////ATyGAQAAAAAAFgAUIgoB0Q5jlXI3vIWjadirvITSd7QAAAAAAAEBK6CGAQAAAAAAIlEgcX50Lq8jZsQjpqvJKD7qBIgBU+B+NOE6ShDTptsR2lwAIgICMEGVnLA5ohZx859OOSXQGHUUsvvqPQ47HSKpI6+nBfkYG9JvMFQAAIABAACAAAAAgAAAAAANAAAAAA==");
             },
             1 => {
-                return b64_psbt("cHNidP8BAFICAAAAAd0n6Ue88GoAyvS3s+K5S2stL3BwdVf+dwGGq1xRyi2HAAAAAAD9////ATyGAQAAAAAAFgAUIgoB0Q5jlXI3vIWjadirvITSd7QAAAAAAAEBK6CGAQAAAAAAIlEgcX50Lq8jZsQjpqvJKD7qBIgBU+B+NOE6ShDTptsR2lwBFyBn3Wj/ueWc19QEdQHevj2Mz+p7VeaU0NX/uw6GruGA9gAiAgIwQZWcsDmiFnHzn045JdAYdRSy++o9DjsdIqkjr6cF+Rgb0m8wVAAAgAEAAIAAAACAAAAAAA0AAAAA");
+                return b64_psbt("cHNidP8BAFICAAAAAd0n6Ue88GoAyvS3s+K5S2stL3BwdVf+dwGGq1xRyi2HAAAAAAD9////ATyGAQAAAAAAFgAUIgoB0Q5jlXI3vIWjadirvITSd7QAAAAAAAEBK6CGAQAAAAAAIlEgcX50Lq8jZsQjpqvJKD7qBIgBU+B+NOE6ShDTptsR2lwBFyBn3Wj/ueWc19QEdQHevj2Mz+p7VeaU0NX/uw6GruGA9iEZZ91o/7nlnNfUBHUB3r49jM/qe1XmlNDV/7sOhq7hgPZCA9ZEsba0rVY3RLO1NPryqBMu9Np3coiJLCYMxXpkT+Z2A1UhLf97PX6BJmh6Yv0ENaP7TeVtmvmuI6HJygWzScjiACICAjBBlZywOaIWcfOfTjkl0Bh1FLL76j0OOx0iqSOvpwX5GBvSbzBUAACAAQAAgAAAAIAAAAAADQAAAAA=");
             },
             _ => {
                 panic!("Invalid test psbt index {}", i);
@@ -330,14 +330,14 @@ mod tests {
 
         let mut psbt = get_test_psbt(1);
 
-        let PartyData { privkey: privkey1, pubkey: pubkey1 } = get_test_party(1);
-        let PartyData { privkey: privkey2, pubkey: pubkey2 } = get_test_party(2);
+        let PartyData { privkey: privkey1, pubkey: pubkey1 } = get_test_party(4);
+        let PartyData { privkey: privkey2, pubkey: pubkey2 } = get_test_party(5);
 
         let participating1 = psbt.get_participating_for_pk(&secp, &pubkey1).expect("results");
-        assert!(participating1.len() == 1);
+        assert_eq!(participating1.len(), 1);
 
         let participating2 = psbt.get_participating_for_pk(&secp, &pubkey2).expect("results");
-        assert!(participating2.len() == 1);
+        assert_eq!(participating2.len(), 1);
 
         let (ridx1, corectx1) = &participating1[0];
         let (ridx2, corectx2) = &participating2[0];

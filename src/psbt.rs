@@ -204,14 +204,14 @@ impl CoreContext {
     pub fn new<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: Option<TapBranchHash>, tap_leaf: Option<TapLeafHash>) -> Result<Self, CoreContextCreateError> {
         let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
 
-        let (tweaked_agg_pk, inner_agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, merkle_root)
+        let (inner_agg_pk, agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, merkle_root)
             .map_err(|_| CoreContextCreateError::InvalidTweak)?;
 
         Ok(CoreContext {
             participant_pubkeys: participant_pubkeys,
             keyagg_cache,
             inner_agg_pk,
-            agg_pk: tweaked_agg_pk,
+            agg_pk,
             merkle_root,
             tap_leaf,
         })
@@ -284,6 +284,10 @@ impl CoreContext {
         (self.inner_agg_pk.from_zkp(), self.tap_leaf)
     }
 
+    fn psbt_key_with_pubkey(&self, pubkey: &ZkpPublicKey) -> (PublicKey, XOnlyPublicKey, Option<TapLeafHash>) {
+        (pubkey.from_zkp(), self.inner_agg_pk.from_zkp(), self.tap_leaf)
+    }
+
     fn agg_pk_set(&self) -> BTreeSet<(XOnlyPublicKey, Option<TapLeafHash>)> {
         let mut result = BTreeSet::new();
         result.insert(self.psbt_key());
@@ -316,7 +320,7 @@ impl CoreContext {
     }
 
     pub fn add_nonce<'a, C: ZkpVerification + ZkpSigning>(&'a self, secp: &ZkpSecp256k1<C>, pubkey: PublicKey, psbt: &mut PartiallySignedTransaction, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a>, NonceGenerateError> {
-        let psbt_key = (pubkey, self.agg_pk.from_zkp(), self.tap_leaf);
+        let psbt_key = self.psbt_key_with_pubkey(&pubkey.to_zkp());
 
         let context = self.generate_nonce(secp, pubkey, psbt, input_index, session, extra_rand)?;
 
@@ -437,7 +441,7 @@ impl<'a> SignContext<'a> {
     }
 
     pub fn sign<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, privkey: &SecretKey, psbt: &mut PartiallySignedTransaction, input_index: usize) -> Result<SignatureAggregateContext<'a>, SignError> {
-        let psbt_key = (self.pubkey.from_zkp(), self.core.agg_pk.from_zkp(), self.core.tap_leaf);
+        let psbt_key = self.core.psbt_key_with_pubkey(&self.pubkey);
 
         let (agg_context, partial_signature) = self.get_partial_signature(secp, privkey, psbt, input_index)?;
 
