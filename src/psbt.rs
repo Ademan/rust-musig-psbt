@@ -266,14 +266,15 @@ impl CoreContext {
     pub fn new_script_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: TapBranchHash, tap_leaf: TapLeafHash) -> Result<Self, CoreContextCreateError> {
         let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
 
-        let agg_pk = keyagg_cache.agg_pk();
+        let (inner_agg_pk, agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, Some(merkle_root))
+            .map_err(|_| CoreContextCreateError::InvalidTweak)?;
 
         Ok(CoreContext {
             participant_pubkeys,
             keyagg_cache,
-            inner_agg_pk: agg_pk,
+            inner_agg_pk,
             agg_pk,
-            merkle_root: None,
+            merkle_root: Some(merkle_root),
             tap_leaf: Some(tap_leaf),
         })
     }
