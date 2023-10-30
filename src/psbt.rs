@@ -502,6 +502,8 @@ impl<'a> SignatureAggregateContext<'a> {
 
     /// Update a psbt input with a newly calculated aggregate signature
     pub fn aggregate_signatures<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, psbt: &mut PartiallySignedTransaction, input_index: usize) -> Result<(), SignatureAggregateError> {
+        let agg_pk = self.core.agg_pk.from_zkp();
+        let tap_leaf = self.core.tap_leaf;
         let signature = self.get_aggregate_signature(secp, psbt, input_index)?;
 
         let input = psbt.inputs
@@ -515,7 +517,12 @@ impl<'a> SignatureAggregateContext<'a> {
             hash_ty: sighash,
         };
 
-        input.tap_key_sig = Some(schnorr_sig);
+        // FIXME: rename tap_leaf_value
+        if let Some(tap_leaf_value) = tap_leaf {
+            input.tap_script_sigs.insert((agg_pk, tap_leaf_value), schnorr_sig);
+        } else {
+            input.tap_key_sig = Some(schnorr_sig);
+        }
 
         Ok(())
     }
