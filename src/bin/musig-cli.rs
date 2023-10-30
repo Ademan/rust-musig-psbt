@@ -4,33 +4,9 @@ use base64::{
     write::EncoderWriter as Base64Writer,
 };
 
-use bitcoin::{
-    Address,
-    OutPoint,
-    Sequence,
-    Script,
-    Txid,
-    TxIn,
-    TxOut,
-    Witness,
-    blockdata::locktime::LockTime,
-    Transaction,
-};
-
 use bitcoin::consensus::encode::{
     Decodable,
-    deserialize,
     Encodable,
-    serialize,
-    serialize_hex
-};
-
-use bitcoin::hashes::{
-    Hash,
-};
-
-use bitcoin::hashes::sha256d::{
-    Hash as Sha256,
 };
 
 use bitcoin::network::constants::{
@@ -40,7 +16,6 @@ use bitcoin::network::constants::{
 use bitcoin::secp256k1::{
     Error as BitcoinError,
     Secp256k1,
-    XOnlyPublicKey,
 };
 
 use bitcoin::util::taproot::{
@@ -57,7 +32,6 @@ use clap::{
 use musig_psbt::{
     CoreContext,
     ExtraRand,
-    FromZkp,
     MusigSessionId,
     PartiallySignedTransaction,
     ParticipantsAddResult,
@@ -66,32 +40,22 @@ use musig_psbt::{
     PublicKey,
     SecretKey,
     SpendInfoAddResult,
-    ToZkp,
-    ZkpAll,
-    ZkpKeyPair,
-    ZkpPublicKey,
     ZkpParity,
     ZkpSecp256k1,
-    ZkpSecretKey,
-    ZkpSigning,
-    ZkpVerification,
 };
 
 use std::io;
-use std::fmt::LowerHex;
 use std::fs::{
     OpenOptions,
     read_to_string,
 };
 
 use std::path::{
-    Path,
     PathBuf,
 };
 
 use std::str::{
     FromStr,
-    Chars,
 };
 
 #[derive(Parser)]
@@ -155,7 +119,7 @@ struct UpdateSubcommand {
 }
 
 impl UpdateSubcommand {
-    fn run(&self, network: Network) {
+    fn run(&self, _network: Network) {
         // TODO: relax and handle stdin/stdout instead
         let in_path = self.in_path.clone().expect("in path");
 
@@ -179,8 +143,6 @@ impl UpdateSubcommand {
             .expect("success decoding psbt");
 
         let core_context = CoreContext::new(&zkp_secp, self.keys.to_owned(), None, None).expect("core context creation success");
-
-        let mut modified = false;
 
         let add_spend_info_results = psbt.add_spend_info(&secp, &core_context)
             .expect("spend info add success");
@@ -234,9 +196,6 @@ impl AggregateSubcommand {
         let merkle_root: Option<TapBranchHash> = None;
 
         let core_context = CoreContext::new(&zkp_secp, self.keys.to_owned(), merkle_root, tap_leaf).expect("core context creation success");
-
-        let pubkeys = [core_context.inner_agg_pk, core_context.agg_pk];
-        let mut pubkey_selection = 1;
 
         let pubkey = if self.untweaked {
             core_context.inner_agg_pk

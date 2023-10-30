@@ -203,7 +203,6 @@ mod tests {
     use base64::{
         engine::general_purpose::STANDARD,
         read::DecoderReader as Base64Reader,
-        write::EncoderWriter as Base64Writer,
     };
 
     use bitcoin::{
@@ -213,7 +212,6 @@ mod tests {
 
     use bitcoin::consensus::encode::{
         Decodable,
-        Encodable,
     };
 
     use bitcoin::secp256k1::{
@@ -226,14 +224,6 @@ mod tests {
         PartiallySignedTransaction,
     };
 
-    use bitcoin::consensus::{
-        deserialize,
-    };
-
-    use bitcoin::hashes::hex::{
-        FromHex,
-    };
-
     use std::collections::{
         btree_map::BTreeMap,
     };
@@ -244,7 +234,6 @@ mod tests {
 
     use crate::{
         MusigSessionId,
-        ToZkp,
         ZkpSecp256k1,
         PsbtHelper,
     };
@@ -259,15 +248,6 @@ mod tests {
                 Some((txin.previous_output.clone(), txout.clone()))
             })
             .collect()
-    }
-
-    fn hex_psbt(hex: &str) -> PartiallySignedTransaction {
-        let bytes: Vec<u8> = FromHex::from_hex(hex).expect("valid hex");
-        deserialize::<PartiallySignedTransaction>(&bytes).expect("valid psbt")
-    }
-
-    fn hex_pubkey(hex: &str) -> PublicKey {
-        PublicKey::from_str(hex).expect("valid hex pubkey")
     }
 
     fn hex_privkey(hex: &str) -> SecretKey {

@@ -10,7 +10,6 @@ use bitcoin::consensus::encode::{
 use bitcoin::psbt::{
     Input as PsbtInput,
     raw::Key as PsbtKey,
-    PartiallySignedTransaction,
 };
 
 use bitcoin::secp256k1::{
@@ -416,11 +415,6 @@ impl PsbtKeyValue for PartialSignatureKeyValue {
     const KEY_TYPE: PsbtKeyType = PSBT_IN_MUSIG_PARTIAL_SIG;
 }
 
-struct Derivation {
-    pub master_fingerprint: [u8; 4],
-    pub path: Vec<u32>,
-}
-
 fn read_all_or_nothing<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<Option<()>, IoError> {
     loop {
         match reader.read(buf) {
@@ -514,24 +508,6 @@ pub fn map_kv_results<K, V, E>() -> impl FnMut((Result<K, E>, Result<V, E>)) -> 
         (Err(e), _) => { Err(e) },
         (_, Err(e)) => { Err(e) },
     }
-}
-
-pub fn filter_deserialize_key<'a, I, K>(iter: I, key_type: PsbtKeyType)
-    -> impl Iterator<Item=Result<(K, &'a Vec<u8>), DeserializeError>>
-where
-    I: Iterator<Item=&'a (PsbtKey, Vec<u8>)>,
-    K: PsbtValue,
-{
-    iter.filter_map(move |(ref key, ref value)| {
-        if key.type_value != key_type {
-            return None;
-        }
-
-        match K::deserialize(&mut Cursor::new(&key.key)) {
-            Ok(k) => { Some(Ok((k, value))) },
-            Err(e) => { Some(Err(e)) },
-        }
-    })
 }
 
 #[derive(Debug)]

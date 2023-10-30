@@ -69,7 +69,6 @@ use crate::serialize::{
     MusigPsbtInputSerializer,
     ToPsbtKeyValue,
     VariableLengthArray,
-    DeserializeError,
 };
 
 use std::collections::{
@@ -149,7 +148,7 @@ pub fn taproot_sighash(psbt: &PartiallySignedTransaction, input_index: usize, ta
     let psbt_sighash = sighash_type.schnorr_hash_ty()
         .map_err(|_| SighashError::IncompatibleSighashError(sighash_type))?;
 
-    let mut txouts: Vec<&TxOut>;
+    let txouts: Vec<&TxOut>;
     let prevouts: Prevouts<_> = match psbt_sighash {
         SchnorrSighashType::None | SchnorrSighashType::NonePlusAnyoneCanPay => {
             return Err(SighashError::UnimplementedSighashError(psbt_sighash));
@@ -218,7 +217,7 @@ impl CoreContext {
     }
 
     pub fn from_psbt_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, psbt_keyvalue: &ParticipantPubkeysKeyValue) -> Result<Vec<Self>, CoreContextCreateError> {
-        let (agg_pk, VariableLengthArray(participant_pubkeys)) = psbt_keyvalue;
+        let (_agg_pk, VariableLengthArray(_participant_pubkeys)) = psbt_keyvalue;
 
         let mut result: Vec<Self> = Vec::new();
 
@@ -279,7 +278,7 @@ impl CoreContext {
         })
     }
 
-    fn is_keyspend(&self) -> bool { self.tap_leaf.is_none() }
+    pub fn is_keyspend(&self) -> bool { self.tap_leaf.is_none() }
 
     fn psbt_key(&self) -> (XOnlyPublicKey, Option<TapLeafHash>) {
         (self.inner_agg_pk.from_zkp(), self.tap_leaf)
@@ -296,9 +295,6 @@ impl CoreContext {
     }
 
     pub fn generate_nonce<'a, C: ZkpVerification + ZkpSigning>(&'a self, secp: &ZkpSecp256k1<C>, pubkey: PublicKey, psbt: &PartiallySignedTransaction, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a>, NonceGenerateError> {
-        let input = psbt.inputs.get(input_index)
-            .ok_or(NonceGenerateError::InvalidInputIndexError)?;
-
         let sighash = taproot_sighash(psbt, input_index, self.tap_leaf)
             .map_err(|e| NonceGenerateError::SighashError(e))?;
 
