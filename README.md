@@ -5,13 +5,10 @@ Caveat emptor! See Warning section.
 # Goals
 
 1. Provide a critical building block for my [Boomfund](boomfund.net) assurance contract project
-2. ~~Explore the desirability of using PSBTs to coordinate collaborative signing in musig~~ The existence of a [draft bip](https://github.com/achow101/bips/tree/musig2-psbt) suggests it is desirable.
-3. ~~Explore the design space of this problem~~ The draft bip is very similar to this proposal in the keyspend case, however this proposal does not address script spends, making the bip a superset.
-4. ~~Seek third party comments on design~~ The draft bip will attract the necessary comments.
-5. Be useful to third parties (after careful review)
-6. ~~(Potentially) seek standardization in a BIP (*lots* more work to be done, in terms of documentation and process development)~~ The author of this proposal is satisfied the draft bip is superior to this proposal.
+2. Be useful to third parties as a library (after careful review)
+3. Provide a rudimentary command line tool excercising library features
 
-This repo is intended to implement the [draft bip](https://github.com/achow101/bips/tree/musig2-psbt).
+This repo implements the [draft bip](https://github.com/achow101/bips/tree/musig2-psbt) for signing psbts using musig.
 
 ### Open Questions
 
@@ -28,8 +25,7 @@ This repo is intended to implement the [draft bip](https://github.com/achow101/b
 
 Caveat emptor!
 
-The author declares himself insufficiently detail oriented to work effectively on a project like this, verify, don't trust. You have been warned.
-This is also the author's first rust project, you have been warned again.
+This code is un-reviewed, barely tested, and cobbled together by the author as his first rust project. You have been warned!
 
 - It depends on an older version of `rust-secp256k1-zkp` for the moment (TODO)
 
@@ -38,6 +34,5 @@ This is also the author's first rust project, you have been warned again.
 * Wildly insufficient tests
 * Zero third party review
 * Doesn't support taproot script spend (TODO)
-* In the rush to slap together this readme, code and the draft bip are almost certianly unaligned.
-* `musig-cli` is not very useful at all, and won't be until PSBT v2 support lands in `rust-bitcoin`
-* Validation needs to be stepped back up
+* This code was hastily adapted from prior work done before the draft bip existed, bugs are expected.
+* `musig-cli` is extremely crude
