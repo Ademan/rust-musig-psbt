@@ -316,7 +316,7 @@ impl SignSubcommand {
         write_psbt(&psbt_with_nonces);
         println!();
 
-        println!("Step 2. Base64 Encoded PSBT with all partial signatures (Step 2 complete for all participants):");
+        println!("Step 3. Base64 Encoded PSBT with all partial signatures (Step 2 complete for all participants):");
         let mut psbt_with_partial_signatures = read_psbt();
 
         aggregate_contexts.into_iter()
