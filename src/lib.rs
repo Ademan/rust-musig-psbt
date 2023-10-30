@@ -319,12 +319,8 @@ mod tests {
         let participating2 = psbt.get_participating_for_pk(&secp, &pubkey2).expect("results");
         assert_eq!(participating2.len(), 1);
 
-        let (ridx1, corectx1) = &participating1[0];
-        let (ridx2, corectx2) = &participating2[0];
-
-        // XXX: there's got to be a better way
-        // Should be able to deref in destructuring... right?
-        let (idx1, idx2) = (*ridx1, *ridx2);
+        let (idx1, ref corectx1) = participating1[0];
+        let (idx2, ref corectx2) = participating2[0];
 
         let extra_rand = [0u8; 32];
         let session1 = MusigSessionId::assume_unique_per_nonce_gen([1u8; 32]);
