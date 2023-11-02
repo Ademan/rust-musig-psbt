@@ -119,10 +119,12 @@ impl Display for SighashError {
 }
 
 #[derive(Debug)]
+/// Error tweaking keyagg cache
 pub enum TweakError {
     TweakError,
 }
 
+/// tweak a keyagg cache for a keyspend
 pub fn tweak_keyagg<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, keyagg_cache: &mut MusigKeyAggCache, merkle_root: Option<TapBranchHash>) -> Result<(ZkpXOnlyPublicKey, ZkpXOnlyPublicKey), TweakError> {
     let inner_pk = keyagg_cache.agg_pk();
 
@@ -193,16 +195,34 @@ pub struct CoreContext {
 }
 
 #[derive(Debug)]
+/// Error creating core context
 pub enum CoreContextCreateError {
     InvalidTweak,
     InvalidInputIndex,
     DeserializeError,
 }
 
+#[derive(Debug)]
+/// Error generating musig nonce
+pub enum NonceGenerateError {
+    NonceGenerateError,
+    SighashError(SighashError),
+    InvalidSighashError,
+    SerializeError,
+    DeserializeError,
+    UnexpectedParticipants,
+    InvalidInputIndexError,
+    ChangedParticipantsError,
+    NoParticipantsError,
+    PlaceholderError,
+}
+
 impl CoreContext {
+    /// Create new core context
     pub fn new<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: Option<TapBranchHash>, tap_leaf: Option<TapLeafHash>) -> Result<Self, CoreContextCreateError> {
         let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
 
+        // FIXME: this assumes keyspend
         let (inner_agg_pk, agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, merkle_root)
             .map_err(|_| CoreContextCreateError::InvalidTweak)?;
 
@@ -216,6 +236,7 @@ impl CoreContext {
         })
     }
 
+    /// Create new core contexts from psbt input
     pub fn from_psbt_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, psbt_keyvalue: &ParticipantPubkeysKeyValue) -> Result<Vec<Self>, CoreContextCreateError> {
         let (_agg_pk, VariableLengthArray(_participant_pubkeys)) = psbt_keyvalue;
 
@@ -239,6 +260,7 @@ impl CoreContext {
     }
 
     // TODO: allow derivation too
+    /// Create new core context from an input's keyspend
     pub fn from_keyspend_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, (agg_pk, VariableLengthArray(participant_pubkeys)): &ParticipantPubkeysKeyValue) -> Result<Option<Self>, CoreContextCreateError> {
         if input.tap_internal_key.as_ref() != Some(&agg_pk) {
             return Ok(None);
@@ -252,19 +274,23 @@ impl CoreContext {
         ))
     }
 
+    /// Calculate script pubkey
     pub fn script_pubkey<C: Verification>(&self, secp: &Secp256k1<C>) -> Script {
         Script::new_v1_p2tr(secp,
                             self.inner_agg_pk.from_zkp(),
                             self.merkle_root)
     }
 
+    /// Calculate address
     pub fn address<C: Verification>(&self, secp: &Secp256k1<C>, network: Network) -> Address {
         Address::p2tr(&secp, self.inner_agg_pk.from_zkp(), self.merkle_root, network)
     }
 
+    /// Create new script spend
     pub fn new_script_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: TapBranchHash, tap_leaf: TapLeafHash) -> Result<Self, CoreContextCreateError> {
         let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
 
+        // FIXME: this isn't right
         let (inner_agg_pk, agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, Some(merkle_root))
             .map_err(|_| CoreContextCreateError::InvalidTweak)?;
 
@@ -278,6 +304,7 @@ impl CoreContext {
         })
     }
 
+    /// Is this context for a keyspend
     pub fn is_keyspend(&self) -> bool { self.tap_leaf.is_none() }
 
     fn psbt_key(&self) -> (XOnlyPublicKey, Option<TapLeafHash>) {
@@ -294,6 +321,7 @@ impl CoreContext {
         result
     }
 
+    /// Generate musig nonces
     pub fn generate_nonce<'a, C: ZkpVerification + ZkpSigning>(&'a self, secp: &ZkpSecp256k1<C>, pubkey: PublicKey, psbt: &PartiallySignedTransaction, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a>, NonceGenerateError> {
         let sighash = taproot_sighash(psbt, input_index, self.tap_leaf)
             .map_err(|e| NonceGenerateError::SighashError(e))?;
@@ -316,6 +344,7 @@ impl CoreContext {
         })
     }
 
+    /// Generate musig nonces and add public nonce to PSBT
     pub fn add_nonce<'a, C: ZkpVerification + ZkpSigning>(&'a self, secp: &ZkpSecp256k1<C>, pubkey: PublicKey, psbt: &mut PartiallySignedTransaction, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a>, NonceGenerateError> {
         let psbt_key = self.psbt_key_with_pubkey(&pubkey.to_zkp());
 
@@ -334,20 +363,6 @@ impl CoreContext {
 
         Ok(context)
     }
-}
-
-#[derive(Debug)]
-pub enum NonceGenerateError {
-    NonceGenerateError,
-    SighashError(SighashError),
-    InvalidSighashError,
-    SerializeError,
-    DeserializeError,
-    UnexpectedParticipants,
-    InvalidInputIndexError,
-    ChangedParticipantsError,
-    NoParticipantsError,
-    PlaceholderError,
 }
 
 /// Context for creating a partial signature
@@ -437,6 +452,7 @@ impl<'a> SignContext<'a> {
         ))
     }
 
+    /// Calculate a partial signature on an input and add it to the PSBT
     pub fn sign<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, privkey: &SecretKey, psbt: &mut PartiallySignedTransaction, input_index: usize) -> Result<SignatureAggregateContext<'a>, SignError> {
         let psbt_key = self.core.psbt_key_with_pubkey(&self.pubkey);
 
@@ -456,11 +472,11 @@ impl<'a> SignContext<'a> {
     }
 }
 
+/// Context for aggregating musig partial signatures
 pub struct SignatureAggregateContext<'a> {
     core: &'a CoreContext,
     session: MusigSession,
     nonces: BTreeMap<PublicKey, MusigPubNonce>,
-    // TODO
 }
 
 #[derive(Debug)]
@@ -551,6 +567,7 @@ impl<'a> SignatureAggregateContext<'a> {
     }
 }
 
+/// Helper to enable easier interaction with PSBTs
 pub trait PsbtHelper {
     fn get_input_script_pubkey(&self, index: usize) -> Option<&Script>;
 
@@ -641,6 +658,7 @@ impl PsbtHelper for PartiallySignedTransaction {
 }
 
 #[derive(Debug)]
+/// Result of adding spend info
 pub enum SpendInfoAddResult {
     InputNoMatch, // XXX: Should this be an error?
     Success {
@@ -650,6 +668,7 @@ pub enum SpendInfoAddResult {
 }
 
 #[derive(Debug)]
+/// Error from adding spend info
 pub enum SpendInfoAddError {
     InvalidIndex,
     WitnessUtxoMissing,
@@ -657,18 +676,21 @@ pub enum SpendInfoAddError {
 }
 
 #[derive(PartialEq, Debug)]
+/// Result of adding participant set
 pub enum ParticipantsAddResult {
     InputNoMatch, // XXX: Should this be an error?
     ParticipantsAdded,
 }
 
 #[derive(Debug)]
+/// Error from adding participant set
 pub enum ParticipantsAddError {
     InvalidIndex,
     SerializeError,
     NoScriptPubkey,
 }
 
+/// Helper to update PSBT with additional information
 pub trait PsbtUpdater {
     fn add_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext) -> Result<Vec<(usize, SpendInfoAddResult)>, SpendInfoAddError>;
 

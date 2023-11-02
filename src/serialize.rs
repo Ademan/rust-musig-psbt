@@ -64,6 +64,8 @@ pub const PSBT_IN_MUSIG_PARTIAL_SIG: u8 = 0x1b;
 // FIXME: psbt key types are actually var ints, once rust-bitcoin updates, update here
 pub type PsbtKeyType = u8;
 
+/// Newtype which is always serialized as a sequence of fixed-length items
+/// which ends when the end of the Reader is reached
 pub struct VariableLengthArray<T>(pub Vec<T>);
 
 pub type ParticipantPubkeysKey = XOnlyPublicKey;
@@ -81,6 +83,7 @@ pub type PartialSignatureValue = MusigPartialSignature;
 pub type PartialSignatureKeyValue = (PartialSignatureKey, PartialSignatureValue);
 
 #[derive(Debug)]
+/// Error when serializing to a PSBT value
 pub enum SerializeError {
     IoError(IoError),
     SerializeError,
@@ -88,12 +91,14 @@ pub enum SerializeError {
 }
 
 #[derive(Debug)]
+/// Error when deserializing a PSBT value
 pub enum DeserializeError {
     IoError(IoError),
     DeserializeError,
     DeserializeElementError(usize),
 }
 
+/// Trait which permits deserializing from Readers and serializing to Writers
 pub trait PsbtValue
     where Self: Sized
 {
@@ -400,6 +405,7 @@ impl PsbtValue for KeySource {
     }
 }
 
+/// Trait mapping PSBT key/value types to a PSBT key type
 pub trait PsbtKeyValue {
     const KEY_TYPE: PsbtKeyType;
 }
@@ -411,6 +417,7 @@ impl PsbtKeyValue for ParticipantPubkeysKeyValue {
 impl PsbtKeyValue for PublicNonceKeyValue {
     const KEY_TYPE: PsbtKeyType = PSBT_IN_MUSIG2_PUB_NONCE;
 }
+
 impl PsbtKeyValue for PartialSignatureKeyValue {
     const KEY_TYPE: PsbtKeyType = PSBT_IN_MUSIG_PARTIAL_SIG;
 }
@@ -433,10 +440,12 @@ fn read_all_or_nothing<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<Option
     }
 }
 
+/// Trait for deserializing from a PSBT key/value pair
 pub trait ToPsbtKeyValue: Sized {
     fn to_psbt(&self) -> Result<(PsbtKey, Vec<u8>), SerializeError>;
 }
 
+/// Trait for serializing to a PSBT key/value pair
 pub trait FromPsbtKeyValue: Sized {
     fn from_psbt(key: &PsbtKey, value: &Vec<u8>) -> Result<Self, DeserializeError>;
 }
@@ -476,11 +485,11 @@ impl<K: PsbtValue, V: PsbtValue> FromPsbtKeyValue for (K, V)
     }
 }
 
-pub fn filter_key_type<'a>(key_type: PsbtKeyType) -> impl FnMut(&(&PsbtKey, &Vec<u8>)) -> bool {
+fn filter_key_type<'a>(key_type: PsbtKeyType) -> impl FnMut(&(&PsbtKey, &Vec<u8>)) -> bool {
     move |&(key, _value)| { key.type_value == key_type }
 }
 
-pub fn deserialize_key<'a, K, V>() -> impl FnMut((&PsbtKey, &'a V)) -> (Result<K, DeserializeError>, &'a V)
+fn deserialize_key<'a, K, V>() -> impl FnMut((&PsbtKey, &'a V)) -> (Result<K, DeserializeError>, &'a V)
 where
     K: PsbtValue,
 {
@@ -488,21 +497,21 @@ where
 }
 
 // FIXME: gross
-pub fn deserialize_key_second<K, V>() -> impl FnMut((&PsbtKey, V)) -> (Result<K, DeserializeError>, V)
+fn deserialize_key_second<K, V>() -> impl FnMut((&PsbtKey, V)) -> (Result<K, DeserializeError>, V)
 where
     K: PsbtValue,
 {
     |(key, value)| (K::deserialize(&mut Cursor::new(&key.key)), value)
 }
 
-pub fn deserialize_value<'a, K, V>() -> impl FnMut((K, &'a Vec<u8>)) -> (K, Result<V, DeserializeError>)
+fn deserialize_value<'a, K, V>() -> impl FnMut((K, &'a Vec<u8>)) -> (K, Result<V, DeserializeError>)
 where
     V: PsbtValue,
 {
     |(key, value)| (key, V::deserialize(&mut Cursor::new(&value[..])))
 }
 
-pub fn map_kv_results<K, V, E>() -> impl FnMut((Result<K, E>, Result<V, E>)) -> Result<(K, V), E> {
+fn map_kv_results<K, V, E>() -> impl FnMut((Result<K, E>, Result<V, E>)) -> Result<(K, V), E> {
     |tup| match tup {
         (Ok(k), Ok(v)) => { Ok((k, v)) },
         (Err(e), _) => { Err(e) },
@@ -511,6 +520,7 @@ pub fn map_kv_results<K, V, E>() -> impl FnMut((Result<K, E>, Result<V, E>)) -> 
 }
 
 #[derive(Debug)]
+/// Error adding an item to a PSBT input
 pub enum AddItemError {
     SerializeError,
     DuplicateKeyError,

@@ -73,12 +73,14 @@ pub use crate::serialize::{
     SerializeError,
 };
 
+/// Trait for converting from libsecp256k1-zkp types to libsecp256k1 types
 pub trait FromZkp {
     type TargetType;
 
     fn from_zkp(&self) -> Self::TargetType;
 }
 
+/// Trait for converting from libsecp256k1 types to libsecp256k1-zkp types
 pub trait ToZkp {
     type ZkpType;
 
@@ -157,6 +159,7 @@ impl ToZkp for PublicKey {
     }
 }
 
+/// Help generate a useful extra "random" value to increase entropy
 pub struct ExtraRand(pub Sha256HashEngine);
 
 impl ExtraRand {
@@ -164,6 +167,7 @@ impl ExtraRand {
         ExtraRand(Sha256HashEngine::default())
     }
 
+    /// Initialize a tagged ExtraRand object
     pub fn tagged(tag: &[u8]) -> Self {
         let mut engine = Sha256HashEngine::default();
         let hashed_tag = Sha256::hash(tag);
@@ -174,6 +178,7 @@ impl ExtraRand {
         ExtraRand(engine)
     }
 
+    /// Add number of nanoseconds since the epoch to the hashed value
     pub fn nanotime(mut self) -> Self {
         // TODO: Review assumption, probably better to panic anyway than to try to be clever
         // This is generally safe from panic, only a drastically misconfigured device would have a
@@ -186,6 +191,7 @@ impl ExtraRand {
         self
     }
 
+    /// Retrieve extra rand bytes suitable to pass to CoreContext::generate_nonce() and CoreContext::add_nonce()
     pub fn into_bytes(self) -> [u8; 32] {
         Sha256::from_engine(self.0).into_inner()
     }
