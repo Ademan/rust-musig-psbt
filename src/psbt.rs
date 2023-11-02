@@ -67,7 +67,6 @@ use crate::{
 use crate::serialize::{
     ParticipantPubkeysKeyValue,
     MusigPsbtInputSerializer,
-    ToPsbtKeyValue,
     VariableLengthArray,
 };
 
@@ -354,12 +353,8 @@ impl CoreContext {
             .get_mut(input_index)
             .ok_or(NonceGenerateError::InvalidInputIndexError)?;
 
-        let (key, value) = (psbt_key, context.pubnonce).to_psbt()
+        input.add_item(psbt_key, context.pubnonce)
             .map_err(|_| NonceGenerateError::SerializeError)?;
-
-        // FIXME: handle case where key is already present, is that an error?
-        input.unknown
-            .insert(key, value);
 
         Ok(context)
     }
@@ -462,11 +457,8 @@ impl<'a> SignContext<'a> {
             .get_mut(input_index)
             .ok_or(SignError::InvalidInputIndexError)?;
 
-        let (key, value) = (psbt_key, partial_signature).to_psbt()
+        input.add_item(psbt_key, partial_signature)
             .map_err(|_| SignError::SerializeError)?;
-
-        input.unknown
-            .insert(key, value);
 
         Ok(agg_context)
     }
