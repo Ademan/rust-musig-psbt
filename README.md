@@ -27,8 +27,6 @@ Caveat emptor!
 
 This code is un-reviewed, barely tested, and cobbled together by the author as his first rust project. You have been warned!
 
-- It depends on an older version of `rust-secp256k1-zkp` for the moment (TODO)
-
 ## Known Issues
 
 * Wildly insufficient tests
