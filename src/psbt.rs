@@ -187,7 +187,7 @@ pub fn taproot_sighash(psbt: &PartiallySignedTransaction, input_index: usize, ta
 pub struct CoreContext {
     pub participant_pubkeys: Vec<PublicKey>,
     keyagg_cache: MusigKeyAggCache,
-    pub inner_agg_pk: ZkpXOnlyPublicKey,
+    pub inner_pk: ZkpXOnlyPublicKey,
     pub agg_pk: ZkpXOnlyPublicKey,
     pub merkle_root: Option<TapBranchHash>,
     pub tap_leaf: Option<TapLeafHash>,
@@ -218,20 +218,35 @@ pub enum NonceGenerateError {
 
 impl CoreContext {
     /// Create new core context
-    pub fn new<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: Option<TapBranchHash>, tap_leaf: Option<TapLeafHash>) -> Result<Self, CoreContextCreateError> {
+    pub fn new_key_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: Option<TapBranchHash>) -> Result<Self, CoreContextCreateError> {
         let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
 
-        // FIXME: this assumes keyspend
         let (inner_agg_pk, agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, merkle_root)
             .map_err(|_| CoreContextCreateError::InvalidTweak)?;
 
         Ok(CoreContext {
             participant_pubkeys: participant_pubkeys,
             keyagg_cache,
-            inner_agg_pk,
+            inner_pk: inner_agg_pk,
             agg_pk,
             merkle_root,
-            tap_leaf,
+            tap_leaf: None,
+        })
+    }
+
+    /// Create new script spend
+    pub fn new_script_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, inner_pk: XOnlyPublicKey, merkle_root: TapBranchHash, tap_leaf: TapLeafHash) -> Result<Self, CoreContextCreateError> {
+        let keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
+
+        let agg_pk = keyagg_cache.agg_pk();
+
+        Ok(CoreContext {
+            participant_pubkeys: participant_pubkeys,
+            keyagg_cache,
+            inner_pk: inner_pk.to_zkp(),
+            agg_pk,
+            merkle_root: Some(merkle_root),
+            tap_leaf: Some(tap_leaf),
         })
     }
 
@@ -266,52 +281,34 @@ impl CoreContext {
         }
 
         Ok(Some(
-            Self::new(secp,
-                      participant_pubkeys.to_owned(),
-                      input.tap_merkle_root,
-                      None)?
+            Self::new_key_spend(secp,
+                participant_pubkeys.to_owned(),
+                input.tap_merkle_root
+            )?
         ))
     }
 
     /// Calculate script pubkey
     pub fn script_pubkey<C: Verification>(&self, secp: &Secp256k1<C>) -> Script {
         Script::new_v1_p2tr(secp,
-                            self.inner_agg_pk.from_zkp(),
+                            self.inner_pk.from_zkp(),
                             self.merkle_root)
     }
 
     /// Calculate address
     pub fn address<C: Verification>(&self, secp: &Secp256k1<C>, network: Network) -> Address {
-        Address::p2tr(&secp, self.inner_agg_pk.from_zkp(), self.merkle_root, network)
-    }
-
-    /// Create new script spend
-    pub fn new_script_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: TapBranchHash, tap_leaf: TapLeafHash) -> Result<Self, CoreContextCreateError> {
-        let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
-
-        // FIXME: this isn't right
-        let (inner_agg_pk, agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, Some(merkle_root))
-            .map_err(|_| CoreContextCreateError::InvalidTweak)?;
-
-        Ok(CoreContext {
-            participant_pubkeys,
-            keyagg_cache,
-            inner_agg_pk,
-            agg_pk,
-            merkle_root: Some(merkle_root),
-            tap_leaf: Some(tap_leaf),
-        })
+        Address::p2tr(&secp, self.inner_pk.from_zkp(), self.merkle_root, network)
     }
 
     /// Is this context for a keyspend
-    pub fn is_keyspend(&self) -> bool { self.tap_leaf.is_none() }
+    pub fn is_key_spend(&self) -> bool { self.tap_leaf.is_none() }
 
     fn psbt_key(&self) -> (XOnlyPublicKey, Option<TapLeafHash>) {
-        (self.inner_agg_pk.from_zkp(), self.tap_leaf)
+        (self.inner_pk.from_zkp(), self.tap_leaf)
     }
 
     fn psbt_key_with_pubkey(&self, pubkey: &ZkpPublicKey) -> (PublicKey, XOnlyPublicKey, Option<TapLeafHash>) {
-        (pubkey.from_zkp(), self.inner_agg_pk.from_zkp(), self.tap_leaf)
+        (pubkey.from_zkp(), self.inner_pk.from_zkp(), self.tap_leaf)
     }
 
     fn agg_pk_set(&self) -> BTreeSet<(XOnlyPublicKey, Option<TapLeafHash>)> {
@@ -722,7 +719,7 @@ impl PsbtUpdater for PartiallySignedTransaction {
         let mut internal_key_modified = false;
         let mut merkle_root_modified = false;
 
-        let tap_internal_key = Some(context.inner_agg_pk.from_zkp());
+        let tap_internal_key = Some(context.inner_pk.from_zkp());
 
         if input.tap_internal_key != tap_internal_key {
             input.tap_internal_key = tap_internal_key;
@@ -765,7 +762,7 @@ impl PsbtUpdater for PartiallySignedTransaction {
             return Ok(ParticipantsAddResult::InputNoMatch);
         }
 
-        input.add_participants(context.inner_agg_pk.from_zkp(), context.participant_pubkeys.as_ref())
+        input.add_participants(context.inner_pk.from_zkp(), context.participant_pubkeys.as_ref())
             .map_err(|_| ParticipantsAddError::SerializeError)?;
 
         Ok(ParticipantsAddResult::ParticipantsAdded)
