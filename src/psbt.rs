@@ -517,14 +517,14 @@ impl<'a> SignatureAggregateContext<'a> {
 
         let sighash = input.schnorr_hash_ty()
             .map_err(|_| SignatureAggregateError::IncompatibleSighashError)?;
+
         let schnorr_sig = SchnorrSig {
             sig: signature.from_zkp(),
             hash_ty: sighash,
         };
 
-        // FIXME: rename tap_leaf_value
-        if let Some(tap_leaf_value) = tap_leaf {
-            input.tap_script_sigs.insert((agg_pk, tap_leaf_value), schnorr_sig);
+        if let Some(tap_leaf_hash) = tap_leaf {
+            input.tap_script_sigs.insert((agg_pk, tap_leaf_hash), schnorr_sig);
         } else {
             input.tap_key_sig = Some(schnorr_sig);
         }
