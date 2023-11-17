@@ -198,7 +198,7 @@ impl AggregateSubcommand {
         let core_context = CoreContext::new(&zkp_secp, self.keys.to_owned(), merkle_root, tap_leaf).expect("core context creation success");
 
         let pubkey = if self.untweaked {
-            core_context.inner_agg_pk
+            core_context.inner_pk
         } else {
             core_context.agg_pk
         };
