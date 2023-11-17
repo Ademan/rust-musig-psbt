@@ -319,10 +319,12 @@ mod tests {
         let PartyData { privkey: privkey1, pubkey: pubkey1 } = get_test_party(4);
         let PartyData { privkey: privkey2, pubkey: pubkey2 } = get_test_party(5);
 
-        let participating1 = psbt.get_participating_for_pk(&secp, &pubkey1).expect("results");
+        let participating1 = psbt.get_participating_for_pk(&secp, &pubkey1)
+            .expect("results");
         assert_eq!(participating1.len(), 1);
 
-        let participating2 = psbt.get_participating_for_pk(&secp, &pubkey2).expect("results");
+        let participating2 = psbt.get_participating_for_pk(&secp, &pubkey2)
+            .expect("results");
         assert_eq!(participating2.len(), 1);
 
         let (idx1, ref corectx1) = participating1[0];
@@ -332,8 +334,10 @@ mod tests {
         let session1 = MusigSessionId::assume_unique_per_nonce_gen([1u8; 32]);
         let session2 = MusigSessionId::assume_unique_per_nonce_gen([2u8; 32]);
 
-        let signctx1 = corectx1.add_nonce(&secp, pubkey1, &mut psbt, idx1, session1, extra_rand).expect("success");
-        let signctx2 = corectx2.add_nonce(&secp, pubkey2, &mut psbt, idx2, session2, extra_rand).expect("success");
+        let signctx1 = corectx1.add_nonce(&secp, pubkey1, &mut psbt, idx1, session1, extra_rand)
+            .expect("success");
+        let signctx2 = corectx2.add_nonce(&secp, pubkey2, &mut psbt, idx2, session2, extra_rand)
+            .expect("success");
 
         let sigaggctx1 = signctx1.sign(&secp, &privkey1, &mut psbt, idx1)
             .expect("sign success");
