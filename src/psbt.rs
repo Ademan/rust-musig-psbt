@@ -3,6 +3,7 @@ use bitcoin::{
     SchnorrSighashType,
     Script,
     TxOut,
+    Witness,
 };
 
 use bitcoin::psbt::{
@@ -556,6 +557,33 @@ impl<'a> SignatureAggregateContext<'a> {
     }
 }
 
+pub trait PsbtInputHelper {
+    fn get_tap_key_spend(&self) -> Option<Witness>;
+
+    fn finalize_key_spend(&mut self) -> Option<Witness>;
+}
+
+impl PsbtInputHelper for PsbtInput {
+    fn get_tap_key_spend(&self) -> Option<Witness> {
+        let mut witness = Witness::new();
+
+        if let Some(signature) = self.tap_key_sig {
+            witness.push(signature.to_vec());
+
+            Some(witness)
+        } else {
+            None
+        }
+    }
+
+    fn finalize_key_spend(&mut self) -> Option<Witness> {
+        let tap_key_spend = self.get_tap_key_spend();
+        self.final_script_witness = tap_key_spend.clone();
+
+        tap_key_spend
+    }
+}
+
 /// Helper to enable easier interaction with PSBTs
 pub trait PsbtHelper {
     fn get_input_script_pubkey(&self, index: usize) -> Option<&Script>;
@@ -580,6 +608,8 @@ pub trait PsbtHelper {
     fn get_participating_by_agg_pk<C: ZkpVerification, F>(&self, secp: &ZkpSecp256k1<C>, f: F) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError>
     where
         F: FnMut(&XOnlyPublicKey) -> bool;
+
+    fn finalize_key_spends(&mut self);
 }
 
 impl PsbtHelper for PartiallySignedTransaction {
@@ -643,6 +673,12 @@ impl PsbtHelper for PartiallySignedTransaction {
         }
 
         Ok(result)
+    }
+
+    fn finalize_key_spends(&mut self) {
+        for input in self.inputs.iter_mut() {
+            input.finalize_key_spend();
+        }
     }
 }
 

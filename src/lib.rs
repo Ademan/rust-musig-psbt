@@ -348,6 +348,9 @@ mod tests {
         sigaggctx2.aggregate_signatures(&secp, &mut sigaggpsbt2, idx2)
             .expect("success");
 
+        sigaggpsbt1.finalize_key_spends();
+        sigaggpsbt2.finalize_key_spends();
+
         let outpoints = outpoint_map(&sigaggpsbt1);
 
         let tx1 = sigaggpsbt1.extract_tx();
