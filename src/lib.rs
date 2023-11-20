@@ -313,6 +313,7 @@ mod tests {
     #[cfg(feature="test",)]
     fn test_basic() {
         let secp = ZkpSecp256k1::new();
+        let normal_secp = Secp256k1::new();
 
         let mut psbt = get_test_psbt(1);
 
@@ -329,6 +330,9 @@ mod tests {
 
         let (idx1, ref corectx1) = participating1[0];
         let (idx2, ref corectx2) = participating2[0];
+
+        assert_eq!(idx1, idx2);
+        assert_eq!(corectx1.script_pubkey(&normal_secp), corectx2.script_pubkey(&normal_secp));
 
         let extra_rand = [0u8; 32];
         let session1 = MusigSessionId::assume_unique_per_nonce_gen([1u8; 32]);
