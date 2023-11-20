@@ -54,6 +54,7 @@ pub use crate::psbt::{
     SignContext,
     SignatureAggregateContext,
     NonceGenerateError,
+    OutpointsMapError,
     ParticipantIndex,
     ParticipantsAddResult,
     PsbtHelper,
@@ -62,6 +63,7 @@ pub use crate::psbt::{
     SignatureAggregateError,
     SpendInfoAddResult,
     tweak_keyagg,
+    VerifyError,
 };
 
 pub use crate::serialize::{
@@ -211,11 +213,6 @@ mod tests {
         read::DecoderReader as Base64Reader,
     };
 
-    use bitcoin::{
-        OutPoint,
-        TxOut,
-    };
-
     use bitcoin::consensus::encode::{
         Decodable,
     };
@@ -230,10 +227,6 @@ mod tests {
         PartiallySignedTransaction,
     };
 
-    use std::collections::{
-        btree_map::BTreeMap,
-    };
-
     use std::str::{
         FromStr,
     };
@@ -243,18 +236,6 @@ mod tests {
         ZkpSecp256k1,
         PsbtHelper,
     };
-
-    fn outpoint_map(psbt: &PartiallySignedTransaction) -> BTreeMap<OutPoint, TxOut> {
-        psbt.unsigned_tx.input
-            .iter()
-            .enumerate()
-            .filter_map(|(i, txin)| {
-                let input = psbt.inputs.get(i)?;
-                let txout = input.witness_utxo.as_ref()?;
-                Some((txin.previous_output.clone(), txout.clone()))
-            })
-            .collect()
-    }
 
     fn hex_privkey(hex: &str) -> SecretKey {
         SecretKey::from_str(hex).expect("valid hex privkey")
@@ -359,15 +340,12 @@ mod tests {
         sigaggpsbt1.finalize_key_spends();
         sigaggpsbt2.finalize_key_spends();
 
-        let outpoints = outpoint_map(&sigaggpsbt1);
+        sigaggpsbt1.verify()
+            .expect("validate transaction");
 
         let tx1 = sigaggpsbt1.extract_tx();
         let tx2 = sigaggpsbt2.extract_tx();
 
         assert_eq!(tx1, tx2);
-
-        tx1.verify(|point: &OutPoint| {
-            outpoints.get(point).map(|txout| txout.clone())
-        }).expect("valid transaction");
     }
 }

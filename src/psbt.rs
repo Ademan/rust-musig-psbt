@@ -1,5 +1,6 @@
 use bitcoin::{
     Address,
+    OutPoint,
     SchnorrSighashType,
     Script,
     TxOut,
@@ -584,6 +585,18 @@ impl PsbtInputHelper for PsbtInput {
     }
 }
 
+#[derive(Debug,Clone)]
+pub enum OutpointsMapError {
+    MissingUtxo,
+    InvalidPrevoutIndex,
+}
+
+#[derive(Debug,Clone)]
+pub enum VerifyError {
+    VerificationFailed,
+    OutpointsMapError(OutpointsMapError),
+}
+
 /// Helper to enable easier interaction with PSBTs
 pub trait PsbtHelper {
     fn get_input_script_pubkey(&self, index: usize) -> Option<&Script>;
@@ -610,6 +623,11 @@ pub trait PsbtHelper {
         F: FnMut(&XOnlyPublicKey) -> bool;
 
     fn finalize_key_spends(&mut self);
+
+    fn outpoints_map(&self) -> Result<BTreeMap<OutPoint, TxOut>, OutpointsMapError>;
+
+    #[cfg(feature="verify")]
+    fn verify(&self) -> Result<(), VerifyError>;
 }
 
 impl PsbtHelper for PartiallySignedTransaction {
@@ -679,6 +697,43 @@ impl PsbtHelper for PartiallySignedTransaction {
         for input in self.inputs.iter_mut() {
             input.finalize_key_spend();
         }
+    }
+
+    fn outpoints_map(&self) -> Result<BTreeMap<OutPoint, TxOut>, OutpointsMapError> {
+        // Borrows pretty heavily from PartiallySignedTransaction::iter_funding_utxos
+        // although it's admittedly *the* obvious approach
+        self.unsigned_tx.input.iter()
+            .zip(&self.inputs)
+            .map(|(txin, input)| {
+            match (&input.witness_utxo, &input.non_witness_utxo) {
+                (Some(witness_utxo), _) => {
+                    Ok((txin.previous_output, witness_utxo.clone()))
+                },
+                (None, Some(non_witness_utxo)) => {
+                    let prevout_index = txin.previous_output.vout as usize;
+                    non_witness_utxo.output.get(prevout_index)
+                        .map(|txout| (txin.previous_output, txout.clone()))
+                        .ok_or(OutpointsMapError::InvalidPrevoutIndex)
+                },
+                (None, None) => {
+                    Err(OutpointsMapError::MissingUtxo)
+                },
+            }
+            })
+            .collect()
+    }
+
+    #[cfg(feature="verify")]
+    fn verify(&self) -> Result<(), VerifyError> {
+        let outpoints = self.outpoints_map()
+            .map_err(|e| VerifyError::OutpointsMapError(e))?;
+
+        let tx = self.clone().extract_tx();
+
+        tx.verify(|outpoint| {
+            outpoints.get(outpoint).map(|txout| txout.clone())
+        })
+        .map_err(|_e| VerifyError::VerificationFailed)
     }
 }
 
