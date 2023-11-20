@@ -339,22 +339,22 @@ mod tests {
         let session2 = MusigSessionId::assume_unique_per_nonce_gen([2u8; 32]);
 
         let signctx1 = corectx1.add_nonce(&secp, pubkey1, &mut psbt, idx1, session1, extra_rand)
-            .expect("success");
+            .expect("context 1 add nonce");
         let signctx2 = corectx2.add_nonce(&secp, pubkey2, &mut psbt, idx2, session2, extra_rand)
-            .expect("success");
+            .expect("context 2 add nonce");
 
         let sigaggctx1 = signctx1.sign(&secp, &privkey1, &mut psbt, idx1)
-            .expect("sign success");
+            .expect("context 1 sign success");
         let sigaggctx2 = signctx2.sign(&secp, &privkey2, &mut psbt, idx2)
-            .expect("sign success");
+            .expect("context 2 sign success");
 
         let mut sigaggpsbt1 = psbt.clone();
         let mut sigaggpsbt2 = psbt.clone();
 
         sigaggctx1.aggregate_signatures(&secp, &mut sigaggpsbt1, idx1)
-            .expect("success");
+            .expect("context 1 aggregate signatures");
         sigaggctx2.aggregate_signatures(&secp, &mut sigaggpsbt2, idx2)
-            .expect("success");
+            .expect("context 2 aggregate signatures");
 
         sigaggpsbt1.finalize_key_spends();
         sigaggpsbt2.finalize_key_spends();
