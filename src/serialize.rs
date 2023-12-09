@@ -13,25 +13,25 @@ use bitcoin::psbt::{
 };
 
 use bitcoin::secp256k1::{
+    PublicKey,
     constants::PUBLIC_KEY_SIZE,
     constants::SCHNORR_PUBLIC_KEY_SIZE,
+    XOnlyPublicKey,
 };
 
-use bitcoin::util::bip32::{
+use bitcoin::bip32::{
     ChildNumber,
     KeySource,
 };
 
-use bitcoin::util::taproot::{
+use bitcoin::taproot::{
     TapLeafHash,
 };
 
-use crate::{
-    PublicKey,
-    MusigPubNonce,
-    MUSIG_PUBNONCE_SERIALIZED_LEN,
+use secp256k1_zkp::{
     MusigPartialSignature,
-    XOnlyPublicKey,
+    MusigPubNonce,
+    ffi::MUSIG_PUBNONCE_SERIALIZED_LEN,
 };
 
 use std::collections::{
@@ -401,7 +401,7 @@ impl PsbtValue for KeySource {
             }
         }
 
-        Ok((fingerprint[..].into(), path.into()))
+        Ok((fingerprint.into(), path.into()))
     }
 }
 

@@ -1,45 +1,29 @@
 mod psbt;
 mod serialize;
 
-pub use secp256k1_zkp::{
-    All as ZkpAll,
-    KeyPair as ZkpKeyPair,
-    Message,
-    MusigAggNonce,
-    MusigKeyAggCache,
-    MusigPartialSignature,
-    MusigPubNonce,
-    ffi::MUSIG_PUBNONCE_SERIALIZED_LEN,
-    MusigSecNonce,
-    MusigSession,
-    MusigSessionId,
-    Parity as ZkpParity,
+pub use bitcoin;
+pub use secp256k1_zkp;
+
+use secp256k1_zkp::{
     PublicKey as ZkpPublicKey,
-    Secp256k1 as ZkpSecp256k1,
     SecretKey as ZkpSecretKey,
     schnorr::Signature as ZkpSchnorrSignature,
-    Signing as ZkpSigning,
-    Verification as ZkpVerification,
     XOnlyPublicKey as ZkpXOnlyPublicKey,
 };
 
-pub use bitcoin::secp256k1::{
+use bitcoin::secp256k1::{
     PublicKey,
     SecretKey,
     schnorr::Signature as SchnorrSignature,
     XOnlyPublicKey,
 };
 
-pub use bitcoin::psbt::{
-    PartiallySignedTransaction,
-};
-
-use bitcoin_hashes::{
+use bitcoin::hashes::{
     Hash,
     HashEngine,
 };
 
-use bitcoin_hashes::sha256::{
+use bitcoin::hashes::sha256::{
     Hash as Sha256,
     HashEngine as Sha256HashEngine,
 };
@@ -174,8 +158,8 @@ impl ExtraRand {
         let mut engine = Sha256HashEngine::default();
         let hashed_tag = Sha256::hash(tag);
 
-        engine.input(&hashed_tag);
-        engine.input(&hashed_tag);
+        engine.input(hashed_tag.as_ref());
+        engine.input(hashed_tag.as_ref());
 
         ExtraRand(engine)
     }
@@ -195,7 +179,7 @@ impl ExtraRand {
 
     /// Retrieve extra rand bytes suitable to pass to CoreContext::generate_nonce() and CoreContext::add_nonce()
     pub fn into_bytes(self) -> [u8; 32] {
-        Sha256::from_engine(self.0).into_inner()
+        Sha256::from_engine(self.0).to_byte_array()
     }
 }
 
@@ -208,23 +192,19 @@ mod tests {
     // There is a workaround but it has some minor drawbacks, so I'm simply alerting you early to
     // this requirement.
 
-    use base64::{
-        engine::general_purpose::STANDARD,
-        read::DecoderReader as Base64Reader,
-    };
-
-    use bitcoin::consensus::encode::{
-        Decodable,
-    };
-
     use bitcoin::secp256k1::{
         PublicKey,
         Secp256k1,
         SecretKey,
     };
 
-    use bitcoin::util::psbt::{
+    use bitcoin::psbt::{
         PartiallySignedTransaction,
+    };
+
+    use secp256k1_zkp::{
+        MusigSessionId,
+        Secp256k1 as ZkpSecp256k1,
     };
 
     use std::str::{
@@ -232,8 +212,6 @@ mod tests {
     };
 
     use crate::{
-        MusigSessionId,
-        ZkpSecp256k1,
         PsbtHelper,
     };
 
@@ -271,9 +249,7 @@ mod tests {
     }
 
     fn b64_psbt(s: &str) -> PartiallySignedTransaction {
-        let mut reader = Base64Reader::new(s.as_bytes(), &STANDARD);
-
-        PartiallySignedTransaction::consensus_decode_from_finite_reader(&mut reader).expect("valid PSBT base64")
+        PartiallySignedTransaction::from_str(s).expect("valid PSBT base64")
     }
 
     fn get_test_psbt(i: usize) -> PartiallySignedTransaction {

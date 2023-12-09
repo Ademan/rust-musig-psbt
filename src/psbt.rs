@@ -1,8 +1,8 @@
 use bitcoin::{
     Address,
     OutPoint,
-    SchnorrSighashType,
     Script,
+    ScriptBuf,
     TxOut,
     Witness,
 };
@@ -23,28 +23,34 @@ use bitcoin::secp256k1::{
     Verification,
 };
 
-use bitcoin::util::sighash::{
+use bitcoin::sighash::{
     Prevouts,
     SighashCache,
+    TapSighash,
+    TapSighashType,
 };
 
-use bitcoin::util::schnorr::{
-    SchnorrSig,
-};
-
-use bitcoin::util::taproot::{
-    TapBranchHash,
+use bitcoin::taproot::{
+    Signature,
     TapLeafHash,
-    TapSighashHash,
+    TapNodeHash,
     TapTweakHash,
-};
-
-use bitcoin_hashes::{
-    Hash,
 };
 
 use crate::{
     FromZkp,
+    ToZkp,
+};
+
+use bitcoin::secp256k1::{
+    XOnlyPublicKey,
+};
+
+use bitcoin::psbt::{
+    PartiallySignedTransaction,
+};
+
+use secp256k1_zkp::{
     Message,
     MusigAggNonce,
     MusigKeyAggCache,
@@ -53,17 +59,14 @@ use crate::{
     MusigSecNonce,
     MusigSession,
     MusigSessionId,
-    PartiallySignedTransaction,
-    ToZkp,
-    XOnlyPublicKey,
-    ZkpKeyPair,
-    ZkpPublicKey,
-    ZkpSchnorrSignature,
-    ZkpSecp256k1,
-    ZkpSecretKey,
-    ZkpSigning,
-    ZkpVerification,
-    ZkpXOnlyPublicKey,
+    KeyPair as ZkpKeyPair,
+    PublicKey as ZkpPublicKey,
+    schnorr::Signature as ZkpSchnorrSignature,
+    Secp256k1 as ZkpSecp256k1,
+    SecretKey as ZkpSecretKey,
+    Signing as ZkpSigning,
+    Verification as ZkpVerification,
+    XOnlyPublicKey as ZkpXOnlyPublicKey,
 };
 
 use crate::serialize::{
@@ -92,7 +95,7 @@ pub type ParticipantIndex = u32;
 pub enum SighashError {
     InvalidInputIndexError,
     IncompatibleSighashError(PsbtSighashType),
-    UnimplementedSighashError(SchnorrSighashType),
+    UnimplementedSighashError(TapSighashType),
     MissingPrevoutError(usize),
     SighashError,
 }
@@ -126,12 +129,12 @@ pub enum TweakError {
 }
 
 /// tweak a keyagg cache for a keyspend
-pub fn tweak_keyagg<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, keyagg_cache: &mut MusigKeyAggCache, merkle_root: Option<TapBranchHash>) -> Result<(ZkpXOnlyPublicKey, ZkpXOnlyPublicKey), TweakError> {
+pub fn tweak_keyagg<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, keyagg_cache: &mut MusigKeyAggCache, merkle_root: Option<TapNodeHash>) -> Result<(ZkpXOnlyPublicKey, ZkpXOnlyPublicKey), TweakError> {
     let inner_pk = keyagg_cache.agg_pk();
 
     let tweak = TapTweakHash::from_key_and_tweak(inner_pk.from_zkp(), merkle_root);
 
-    let tweak_key = ZkpSecretKey::from_slice(tweak.as_inner())
+    let tweak_key = ZkpSecretKey::from_slice(tweak.as_ref())
         .map_err(|_| TweakError::TweakError)?; // tweak is not a valid private key
 
     let tweaked_pk = keyagg_cache.pubkey_xonly_tweak_add(secp, tweak_key)
@@ -141,22 +144,22 @@ pub fn tweak_keyagg<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, keyagg_cache: &m
 }
 
 /// Generate the sighash to sign for a taproot input
-pub fn taproot_sighash(psbt: &PartiallySignedTransaction, input_index: usize, tap_leaf: Option<TapLeafHash>) -> Result<TapSighashHash, SighashError> {
+pub fn taproot_sighash(psbt: &PartiallySignedTransaction, input_index: usize, tap_leaf: Option<TapLeafHash>) -> Result<TapSighash, SighashError> {
     let psbt_input = psbt.inputs.get(input_index)
         .ok_or(SighashError::InvalidInputIndexError)?;
 
     let sighash_type = psbt_input.sighash_type
-        .unwrap_or(SchnorrSighashType::Default.into());
+        .unwrap_or(TapSighashType::Default.into());
 
-    let psbt_sighash = sighash_type.schnorr_hash_ty()
+    let psbt_sighash = sighash_type.taproot_hash_ty()
         .map_err(|_| SighashError::IncompatibleSighashError(sighash_type))?;
 
     let txouts: Vec<&TxOut>;
     let prevouts: Prevouts<_> = match psbt_sighash {
-        SchnorrSighashType::None | SchnorrSighashType::NonePlusAnyoneCanPay => {
+        TapSighashType::None | TapSighashType::NonePlusAnyoneCanPay => {
             return Err(SighashError::UnimplementedSighashError(psbt_sighash));
         },
-        SchnorrSighashType::Default | SchnorrSighashType::All | SchnorrSighashType::Single => {
+        TapSighashType::Default | TapSighashType::All | TapSighashType::Single => {
             let fallible_txouts: Result<Vec<&TxOut>, _> = psbt.inputs.iter()
                 .enumerate()
                 .map(|(i, input)| match &input.witness_utxo {
@@ -167,7 +170,7 @@ pub fn taproot_sighash(psbt: &PartiallySignedTransaction, input_index: usize, ta
             txouts = fallible_txouts?;
             Prevouts::All(&txouts[..])
         },
-        SchnorrSighashType::AllPlusAnyoneCanPay | SchnorrSighashType::SinglePlusAnyoneCanPay => {
+        TapSighashType::AllPlusAnyoneCanPay | TapSighashType::SinglePlusAnyoneCanPay => {
             let utxo = psbt_input.witness_utxo
                 .as_ref()
                 .ok_or(SighashError::MissingPrevoutError(input_index))?;
@@ -191,7 +194,7 @@ pub struct CoreContext {
     keyagg_cache: MusigKeyAggCache,
     pub inner_pk: ZkpXOnlyPublicKey,
     pub agg_pk: ZkpXOnlyPublicKey,
-    pub merkle_root: Option<TapBranchHash>,
+    pub merkle_root: Option<TapNodeHash>,
     pub tap_leaf: Option<TapLeafHash>,
 }
 
@@ -220,7 +223,7 @@ pub enum NonceGenerateError {
 
 impl CoreContext {
     /// Create new core context
-    pub fn new_key_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: Option<TapBranchHash>) -> Result<Self, CoreContextCreateError> {
+    pub fn new_key_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: Option<TapNodeHash>) -> Result<Self, CoreContextCreateError> {
         let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
 
         let (inner_agg_pk, agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, merkle_root)
@@ -237,7 +240,7 @@ impl CoreContext {
     }
 
     /// Create new script spend
-    pub fn new_script_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, inner_pk: XOnlyPublicKey, merkle_root: TapBranchHash, tap_leaf: TapLeafHash) -> Result<Self, CoreContextCreateError> {
+    pub fn new_script_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, inner_pk: XOnlyPublicKey, merkle_root: TapNodeHash, tap_leaf: TapLeafHash) -> Result<Self, CoreContextCreateError> {
         let keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
 
         let agg_pk = keyagg_cache.agg_pk();
@@ -291,8 +294,8 @@ impl CoreContext {
     }
 
     /// Calculate script pubkey
-    pub fn script_pubkey<C: Verification>(&self, secp: &Secp256k1<C>) -> Script {
-        Script::new_v1_p2tr(secp,
+    pub fn script_pubkey<C: Verification>(&self, secp: &Secp256k1<C>) -> ScriptBuf {
+        ScriptBuf::new_v1_p2tr(secp,
                             self.inner_pk.from_zkp(),
                             self.merkle_root)
     }
@@ -324,7 +327,7 @@ impl CoreContext {
         let sighash = taproot_sighash(psbt, input_index, self.tap_leaf)
             .map_err(|e| NonceGenerateError::SighashError(e))?;
 
-        let sighash_message = Message::from_slice(&sighash.into_inner())
+        let sighash_message = Message::from_slice(sighash.as_ref())
             .map_err(|_| NonceGenerateError::InvalidSighashError)?;
 
         let (secnonce, pubnonce) = self.keyagg_cache.nonce_gen(secp, session,
@@ -414,7 +417,7 @@ impl<'a> SignContext<'a> {
         let sighash = taproot_sighash(psbt, input_index, self.core.tap_leaf)
             .map_err(|_| SignError::SighashError)?;
 
-        let sighash_message = Message::from_slice(&sighash.into_inner())
+        let sighash_message = Message::from_slice(sighash.as_ref())
             .map_err(|_| SignError::SighashError)?;
 
         let session = MusigSession::new(secp, &self.core.keyagg_cache, aggnonce, sighash_message);
@@ -517,10 +520,10 @@ impl<'a> SignatureAggregateContext<'a> {
             .get_mut(input_index)
             .ok_or(SignatureAggregateError::InvalidInputIndexError)?;
 
-        let sighash = input.schnorr_hash_ty()
+        let sighash = input.taproot_hash_ty()
             .map_err(|_| SignatureAggregateError::IncompatibleSighashError)?;
 
-        let schnorr_sig = SchnorrSig {
+        let schnorr_sig = Signature {
             sig: signature.from_zkp(),
             hash_ty: sighash,
         };
@@ -798,7 +801,7 @@ impl PsbtUpdater for PartiallySignedTransaction {
     fn add_input_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, index: usize) -> Result<SpendInfoAddResult, SpendInfoAddError> {
         let script_pubkey = self.get_input_script_pubkey(index)
             .ok_or(SpendInfoAddError::NoScriptPubkey)?
-            .clone();
+            .to_owned();
 
         let input = self.inputs.get_mut(index)
             .ok_or(SpendInfoAddError::InvalidIndex)?;
@@ -844,7 +847,7 @@ impl PsbtUpdater for PartiallySignedTransaction {
     fn add_input_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, index: usize) -> Result<ParticipantsAddResult, ParticipantsAddError> {
         let script_pubkey = self.get_input_script_pubkey(index)
             .ok_or(ParticipantsAddError::NoScriptPubkey)?
-            .clone();
+            .to_owned();
 
         let input = self.inputs.get_mut(index)
             .ok_or(ParticipantsAddError::InvalidIndex)?;

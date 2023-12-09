@@ -1,14 +1,3 @@
-use base64::{
-    engine::general_purpose::STANDARD,
-    read::DecoderReader as Base64Reader,
-    write::EncoderWriter as Base64Writer,
-};
-
-use bitcoin::consensus::encode::{
-    Decodable,
-    Encodable,
-};
-
 use bitcoin::network::constants::{
     Network,
 };
@@ -18,8 +7,8 @@ use bitcoin::secp256k1::{
     Secp256k1,
 };
 
-use bitcoin::util::taproot::{
-    TapBranchHash,
+use bitcoin::taproot::{
+    TapNodeHash,
     TapLeafHash,
 };
 
@@ -32,23 +21,32 @@ use clap::{
 use musig_psbt::{
     CoreContext,
     ExtraRand,
-    MusigSessionId,
-    PartiallySignedTransaction,
     ParticipantsAddResult,
     PsbtHelper,
     PsbtUpdater,
+    SpendInfoAddResult,
+};
+
+use musig_psbt::secp256k1_zkp::{
+    MusigSessionId,
+    Parity as ZkpParity,
+    Secp256k1 as ZkpSecp256k1,
+};
+
+use musig_psbt::bitcoin::psbt::{
+    PartiallySignedTransaction,
+};
+
+use musig_psbt::bitcoin::secp256k1::{
     PublicKey,
     SecretKey,
-    SpendInfoAddResult,
-    ZkpParity,
-    ZkpSecp256k1,
 };
 
 use std::io;
 use std::fs::{
-    OpenOptions,
     read_to_string,
 };
+use std::fs;
 
 use std::path::{
     PathBuf,
@@ -102,7 +100,7 @@ struct UpdateSubcommand {
     #[arg(required=true, value_parser = parse_pubkey)]
     keys: Vec<PublicKey>,
 
-    //Option<TapBranchHash>,
+    //Option<TapNodeHash>,
 
     #[arg(short = 'i', long = "in")]
     in_path: Option<PathBuf>,
@@ -134,15 +132,13 @@ impl UpdateSubcommand {
         let secp = Secp256k1::new();
         let zkp_secp = ZkpSecp256k1::new();
 
-        let mut in_psbt_file = OpenOptions::new()
-            .read(true)
-            .open(in_path)
-            .expect("success opening psbt file");
+        let psbt_bytes = fs::read(in_path)
+            .expect("read psbt file");
 
-        let mut psbt = PartiallySignedTransaction::consensus_decode_from_finite_reader(&mut in_psbt_file)
+        let mut psbt = PartiallySignedTransaction::deserialize(&psbt_bytes[..])
             .expect("success decoding psbt");
 
-        let core_context = CoreContext::new(&zkp_secp, self.keys.to_owned(), None, None).expect("core context creation success");
+        let core_context = CoreContext::new_key_spend(&zkp_secp, self.keys.to_owned(), None).expect("core context creation success");
 
         let add_spend_info_results = psbt.add_spend_info(&secp, &core_context)
             .expect("spend info add success");
@@ -168,13 +164,7 @@ impl UpdateSubcommand {
             }
         }
 
-        let mut psbt_out_file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(out_path)
-            .expect("success opening output file");
-
-        psbt.consensus_encode(&mut psbt_out_file)
+        fs::write(out_path, psbt.serialize())
             .expect("success writing");
     }
 }
@@ -193,9 +183,13 @@ impl AggregateSubcommand {
         let zkp_secp = ZkpSecp256k1::new();
 
         let tap_leaf: Option<TapLeafHash> = None;
-        let merkle_root: Option<TapBranchHash> = None;
+        let merkle_root: Option<TapNodeHash> = None;
 
-        let core_context = CoreContext::new(&zkp_secp, self.keys.to_owned(), merkle_root, tap_leaf).expect("core context creation success");
+        let core_context = if let Some(_tap_leaf) = tap_leaf {
+            unimplemented!("Script path unimplemented");
+        } else {
+            CoreContext::new_key_spend(&zkp_secp, self.keys.to_owned(), merkle_root).expect("core context creation success")
+        };
 
         let pubkey = if self.untweaked {
             core_context.inner_pk
@@ -255,9 +249,7 @@ impl SignSubcommand {
             })
             .collect();
 
-        println!("With nonce: ");
-        write_psbt(&aggregate_psbt);
-        println!();
+        println!("With nonce: {aggregate_psbt}");
 
         println!("Step 2. Base64 Encoded PSBT with all nonces (Step 1 complete for all participants):");
         let mut psbt_with_nonces = read_psbt();
@@ -271,9 +263,7 @@ impl SignSubcommand {
             })
             .collect();
 
-        println!("With (partial) signature: ");
-        write_psbt(&psbt_with_nonces);
-        println!();
+        println!("With (partial) signature: {psbt_with_nonces}");
 
         println!("Step 3. Base64 Encoded PSBT with all partial signatures (Step 2 complete for all participants):");
         let mut psbt_with_partial_signatures = read_psbt();
@@ -284,9 +274,7 @@ impl SignSubcommand {
                     .expect("aggregate signatures");
             });
 
-        println!("With signature: ");
-        write_psbt(&psbt_with_partial_signatures);
-        println!();
+        println!("With signature: {psbt_with_partial_signatures}");
     }
 }
 
@@ -311,15 +299,7 @@ fn read_psbt() -> PartiallySignedTransaction {
         panic!("expected ascii");
     }
 
-    let line_bytes = line_in.trim().as_bytes();
-
-    let mut reader = Base64Reader::new(line_bytes, &STANDARD);
-
-    PartiallySignedTransaction::consensus_decode_from_finite_reader(&mut reader).expect("valid PSBT base64")
-}
-
-fn write_psbt(psbt: &PartiallySignedTransaction) {
-    psbt.consensus_encode(&mut Base64Writer::new(&mut io::stdout(), &STANDARD)).expect("successful writing");
+    PartiallySignedTransaction::from_str(line_in.trim().as_ref()).expect("valid PSBT base64")
 }
 
 fn main() {
