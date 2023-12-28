@@ -4,7 +4,7 @@ Caveat emptor! See Warning section.
 
 # Goals
 
-1. Provide a critical building block for my [Boomfund](https://boomfund.net) assurance contract project
+1. Provide a critical building block for my [Boomfund](http://boomfund.net) assurance contract project
 2. Be useful to third parties as a library (after careful review)
 3. Provide a rudimentary command line tool excercising library features
 
