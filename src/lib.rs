@@ -55,7 +55,7 @@ pub use crate::serialize::{
     MusigPsbtInputSerializer,
     PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS,
     PSBT_IN_MUSIG2_PUB_NONCE,
-    PSBT_IN_MUSIG_PARTIAL_SIG,
+    PSBT_IN_MUSIG2_PARTIAL_SIG,
     SerializeError,
 };
 

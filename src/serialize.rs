@@ -57,12 +57,12 @@ use crate::{
 
 const MUSIG_PARTIAL_SIGNATURE_SERIALIZED_LEN: usize = 32;
 
-pub const PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS: u8 = 0x19;
-pub const PSBT_IN_MUSIG2_PUB_NONCE: u8 = 0x1a;
-pub const PSBT_IN_MUSIG_PARTIAL_SIG: u8 = 0x1b;
-
 // FIXME: psbt key types are actually var ints, once rust-bitcoin updates, update here
 pub type PsbtKeyType = u8;
+
+pub const PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS: PsbtKeyType = 0x19;
+pub const PSBT_IN_MUSIG2_PUB_NONCE: PsbtKeyType = 0x1a;
+pub const PSBT_IN_MUSIG2_PARTIAL_SIG: PsbtKeyType = 0x1b;
 
 /// Newtype which is always serialized as a sequence of fixed-length items
 /// which ends when the end of the Reader is reached
@@ -419,7 +419,7 @@ impl PsbtKeyValue for PublicNonceKeyValue {
 }
 
 impl PsbtKeyValue for PartialSignatureKeyValue {
-    const KEY_TYPE: PsbtKeyType = PSBT_IN_MUSIG_PARTIAL_SIG;
+    const KEY_TYPE: PsbtKeyType = PSBT_IN_MUSIG2_PARTIAL_SIG;
 }
 
 fn read_all_or_nothing<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<Option<()>, IoError> {
@@ -674,7 +674,7 @@ impl MusigPsbtInputSerializer for PsbtInput {
         F: FnMut(&PublicKey, &XOnlyPublicKey, Option<&TapLeafHash>) -> bool,
     {
         self.unknown.iter()
-            .filter(filter_key_type(PSBT_IN_MUSIG_PARTIAL_SIG))
+            .filter(filter_key_type(PSBT_IN_MUSIG2_PARTIAL_SIG))
             .map(deserialize_key::<PartialSignatureKey, _>())
             .filter(|(ref key_result, ref _value)|
                 match key_result {
