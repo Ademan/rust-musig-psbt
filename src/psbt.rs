@@ -1,5 +1,6 @@
 use bitcoin::{
     Address,
+    Network,
     OutPoint,
     Script,
     ScriptBuf,
@@ -10,10 +11,6 @@ use bitcoin::{
 use bitcoin::psbt::{
     Input as PsbtInput,
     PsbtSighashType,
-};
-
-use bitcoin::network::constants::{
-    Network,
 };
 
 use bitcoin::secp256k1::{
@@ -59,7 +56,7 @@ use secp256k1_zkp::{
     MusigSecNonce,
     MusigSession,
     MusigSessionId,
-    KeyPair as ZkpKeyPair,
+    Keypair as ZkpKeyPair,
     PublicKey as ZkpPublicKey,
     schnorr::Signature as ZkpSchnorrSignature,
     Secp256k1 as ZkpSecp256k1,
@@ -129,7 +126,7 @@ pub enum TweakError {
 }
 
 /// tweak a keyagg cache for a keyspend
-pub fn tweak_keyagg<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, keyagg_cache: &mut MusigKeyAggCache, merkle_root: Option<TapNodeHash>) -> Result<(ZkpXOnlyPublicKey, ZkpXOnlyPublicKey), TweakError> {
+fn tweak_keyagg_keyspend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, keyagg_cache: &mut MusigKeyAggCache, merkle_root: Option<TapNodeHash>) -> Result<(ZkpXOnlyPublicKey, ZkpPublicKey), TweakError> {
     let inner_pk = keyagg_cache.agg_pk();
 
     let tweak = TapTweakHash::from_key_and_tweak(inner_pk.from_zkp(), merkle_root);
@@ -193,7 +190,8 @@ pub struct CoreContext {
     pub participant_pubkeys: Vec<PublicKey>,
     keyagg_cache: MusigKeyAggCache,
     pub inner_pk: ZkpXOnlyPublicKey,
-    pub agg_pk: ZkpXOnlyPublicKey,
+    /// The compressed aggregate public key used as a lookup key in the PSBT
+    pub key_agg_pk: ZkpPublicKey,
     pub merkle_root: Option<TapNodeHash>,
     pub tap_leaf: Option<TapLeafHash>,
 }
@@ -226,14 +224,16 @@ impl CoreContext {
     pub fn new_key_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: Option<TapNodeHash>) -> Result<Self, CoreContextCreateError> {
         let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
 
-        let (inner_agg_pk, agg_pk) = tweak_keyagg(secp, &mut keyagg_cache, merkle_root)
+        let key_agg_pk = keyagg_cache.agg_pk_full();
+
+        let (inner_pk, agg_pk) = tweak_keyagg_keyspend(secp, &mut keyagg_cache, merkle_root)
             .map_err(|_| CoreContextCreateError::InvalidTweak)?;
 
         Ok(CoreContext {
             participant_pubkeys: participant_pubkeys,
             keyagg_cache,
-            inner_pk: inner_agg_pk,
-            agg_pk,
+            inner_pk,
+            key_agg_pk,
             merkle_root,
             tap_leaf: None,
         })
@@ -243,13 +243,14 @@ impl CoreContext {
     pub fn new_script_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, inner_pk: XOnlyPublicKey, merkle_root: TapNodeHash, tap_leaf: TapLeafHash) -> Result<Self, CoreContextCreateError> {
         let keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
 
-        let agg_pk = keyagg_cache.agg_pk();
+        let agg_pk = keyagg_cache.agg_pk_full();
 
+        // FIXME: surely wrong
         Ok(CoreContext {
             participant_pubkeys: participant_pubkeys,
             keyagg_cache,
             inner_pk: inner_pk.to_zkp(),
-            agg_pk,
+            key_agg_pk: agg_pk,
             merkle_root: Some(merkle_root),
             tap_leaf: Some(tap_leaf),
         })
@@ -257,11 +258,11 @@ impl CoreContext {
 
     /// Create new core contexts from psbt input
     pub fn from_psbt_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, psbt_keyvalue: &ParticipantPubkeysKeyValue) -> Result<Vec<Self>, CoreContextCreateError> {
-        let (_agg_pk, VariableLengthArray(_participant_pubkeys)) = psbt_keyvalue;
+        let (_agg_pk, VariableLengthArray(participant_pubkeys)) = psbt_keyvalue;
 
         let mut result: Vec<Self> = Vec::new();
 
-        if let Some(keyspend_context) = Self::from_keyspend_input(secp, input, psbt_keyvalue)? {
+        if let Some(keyspend_context) = Self::from_keyspend_input(secp, input, participant_pubkeys)? {
             result.push(keyspend_context);
         }
 
@@ -280,11 +281,7 @@ impl CoreContext {
 
     // TODO: allow derivation too
     /// Create new core context from an input's keyspend
-    pub fn from_keyspend_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, (agg_pk, VariableLengthArray(participant_pubkeys)): &ParticipantPubkeysKeyValue) -> Result<Option<Self>, CoreContextCreateError> {
-        if input.tap_internal_key.as_ref() != Some(&agg_pk) {
-            return Ok(None);
-        }
-
+    pub fn from_keyspend_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, participant_pubkeys: &[PublicKey]) -> Result<Option<Self>, CoreContextCreateError> {
         Ok(Some(
             Self::new_key_spend(secp,
                 participant_pubkeys.to_owned(),
@@ -308,15 +305,19 @@ impl CoreContext {
     /// Is this context for a keyspend
     pub fn is_key_spend(&self) -> bool { self.tap_leaf.is_none() }
 
-    fn psbt_key(&self) -> (XOnlyPublicKey, Option<TapLeafHash>) {
-        (self.inner_pk.from_zkp(), self.tap_leaf)
+    pub fn xonly_key(&self) -> XOnlyPublicKey {
+        self.keyagg_cache.agg_pk().from_zkp()
     }
 
-    fn psbt_key_with_pubkey(&self, pubkey: &ZkpPublicKey) -> (PublicKey, XOnlyPublicKey, Option<TapLeafHash>) {
-        (pubkey.from_zkp(), self.inner_pk.from_zkp(), self.tap_leaf)
+    fn psbt_key(&self) -> (PublicKey, Option<TapLeafHash>) {
+        (self.key_agg_pk.from_zkp(), self.tap_leaf)
     }
 
-    fn agg_pk_set(&self) -> BTreeSet<(XOnlyPublicKey, Option<TapLeafHash>)> {
+    fn psbt_key_with_pubkey(&self, pubkey: &ZkpPublicKey) -> (PublicKey, PublicKey, Option<TapLeafHash>) {
+        (pubkey.from_zkp(), self.key_agg_pk.from_zkp(), self.tap_leaf)
+    }
+
+    fn agg_pk_set(&self) -> BTreeSet<(PublicKey, Option<TapLeafHash>)> {
         let mut result = BTreeSet::new();
         result.insert(self.psbt_key());
         result
@@ -327,7 +328,7 @@ impl CoreContext {
         let sighash = taproot_sighash(psbt, input_index, self.tap_leaf)
             .map_err(|e| NonceGenerateError::SighashError(e))?;
 
-        let sighash_message = Message::from_slice(sighash.as_ref())
+        let sighash_message = Message::from_digest_slice(sighash.as_ref())
             .map_err(|_| NonceGenerateError::InvalidSighashError)?;
 
         let (secnonce, pubnonce) = self.keyagg_cache.nonce_gen(secp, session,
@@ -417,7 +418,7 @@ impl<'a> SignContext<'a> {
         let sighash = taproot_sighash(psbt, input_index, self.core.tap_leaf)
             .map_err(|_| SignError::SighashError)?;
 
-        let sighash_message = Message::from_slice(sighash.as_ref())
+        let sighash_message = Message::from_digest_slice(sighash.as_ref())
             .map_err(|_| SignError::SighashError)?;
 
         let session = MusigSession::new(secp, &self.core.keyagg_cache, aggnonce, sighash_message);
@@ -512,7 +513,7 @@ impl<'a> SignatureAggregateContext<'a> {
 
     /// Update a psbt input with a newly calculated aggregate signature
     pub fn aggregate_signatures<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, psbt: &mut PartiallySignedTransaction, input_index: usize) -> Result<(), SignatureAggregateError> {
-        let agg_pk = self.core.agg_pk.from_zkp();
+        let _agg_pk = self.core.key_agg_pk.from_zkp();
         let tap_leaf = self.core.tap_leaf;
         let signature = self.get_aggregate_signature(secp, psbt, input_index)?;
 
@@ -529,7 +530,9 @@ impl<'a> SignatureAggregateContext<'a> {
         };
 
         if let Some(tap_leaf_hash) = tap_leaf {
-            input.tap_script_sigs.insert((agg_pk, tap_leaf_hash), schnorr_sig);
+            // FIXME
+            //input.tap_script_sigs.insert((agg_pk, tap_leaf_hash), schnorr_sig);
+            todo!();
         } else {
             input.tap_key_sig = Some(schnorr_sig);
         }
@@ -611,7 +614,7 @@ pub trait PsbtHelper {
         })
     }
 
-    fn get_participating_for_agg_pk<C: ZkpVerification>(&self, secp: &ZkpSecp256k1<C>, target_agg_pk: &XOnlyPublicKey) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError> {
+    fn get_participating_for_agg_pk<C: ZkpVerification>(&self, secp: &ZkpSecp256k1<C>, target_agg_pk: &PublicKey) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError> {
         self.get_participating_by_agg_pk(secp, |found_agg_pk| {
             found_agg_pk == target_agg_pk
         })
@@ -623,7 +626,7 @@ pub trait PsbtHelper {
 
     fn get_participating_by_agg_pk<C: ZkpVerification, F>(&self, secp: &ZkpSecp256k1<C>, f: F) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError>
     where
-        F: FnMut(&XOnlyPublicKey) -> bool;
+        F: FnMut(&PublicKey) -> bool;
 
     fn finalize_key_spends(&mut self);
 
@@ -678,7 +681,7 @@ impl PsbtHelper for PartiallySignedTransaction {
 
     fn get_participating_by_agg_pk<C: ZkpVerification, F>(&self, secp: &ZkpSecp256k1<C>, mut f: F) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError>
     where
-        F: FnMut(&XOnlyPublicKey) -> bool,
+        F: FnMut(&PublicKey) -> bool,
     {
         let mut result: Vec<(usize, CoreContext)> = Vec::new();
 
@@ -856,7 +859,7 @@ impl PsbtUpdater for PartiallySignedTransaction {
             return Ok(ParticipantsAddResult::InputNoMatch);
         }
 
-        input.add_participants(context.inner_pk.from_zkp(), context.participant_pubkeys.as_ref())
+        input.add_participants(context.key_agg_pk.from_zkp(), context.participant_pubkeys.as_ref())
             .map_err(|_| ParticipantsAddError::SerializeError)?;
 
         Ok(ParticipantsAddResult::ParticipantsAdded)

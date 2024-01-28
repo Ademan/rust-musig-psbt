@@ -46,7 +46,6 @@ pub use crate::psbt::{
     SignError,
     SignatureAggregateError,
     SpendInfoAddResult,
-    tweak_keyagg,
     VerifyError,
 };
 
@@ -248,17 +247,10 @@ mod tests {
         }
     }
 
-    fn b64_psbt(s: &str) -> PartiallySignedTransaction {
-        PartiallySignedTransaction::from_str(s).expect("valid PSBT base64")
-    }
-
     fn get_test_psbt(i: usize) -> PartiallySignedTransaction {
         match i {
-            0 => {
-                return b64_psbt("cHNidP8BAFICAAAAAd0n6Ue88GoAyvS3s+K5S2stL3BwdVf+dwGGq1xRyi2HAAAAAAD9////ATyGAQAAAAAAFgAUIgoB0Q5jlXI3vIWjadirvITSd7QAAAAAAAEBK6CGAQAAAAAAIlEgcX50Lq8jZsQjpqvJKD7qBIgBU+B+NOE6ShDTptsR2lwAIgICMEGVnLA5ohZx859OOSXQGHUUsvvqPQ47HSKpI6+nBfkYG9JvMFQAAIABAACAAAAAgAAAAAANAAAAAA==");
-            },
             1 => {
-                return b64_psbt("cHNidP8BAFICAAAAAd0n6Ue88GoAyvS3s+K5S2stL3BwdVf+dwGGq1xRyi2HAAAAAAD9////ATyGAQAAAAAAFgAUIgoB0Q5jlXI3vIWjadirvITSd7QAAAAAAAEBK6CGAQAAAAAAIlEgcX50Lq8jZsQjpqvJKD7qBIgBU+B+NOE6ShDTptsR2lwBFyBn3Wj/ueWc19QEdQHevj2Mz+p7VeaU0NX/uw6GruGA9iEZZ91o/7nlnNfUBHUB3r49jM/qe1XmlNDV/7sOhq7hgPZCA9ZEsba0rVY3RLO1NPryqBMu9Np3coiJLCYMxXpkT+Z2A1UhLf97PX6BJmh6Yv0ENaP7TeVtmvmuI6HJygWzScjiACICAjBBlZywOaIWcfOfTjkl0Bh1FLL76j0OOx0iqSOvpwX5GBvSbzBUAACAAQAAgAAAAIAAAAAADQAAAAA=");
+                return PartiallySignedTransaction::from_str("cHNidP8BAHECAAAAAVWeGvTcMyC0uT9CncnUpsDRzlJfELl63dH4hx2tx+xcAAAAAAD9////AriCAQAAAAAAFgAUw4SYk4+KJyWc+4EDAxjVcEiXVYgT3roAAAAAABYAFB20v/TvT7Mnod3CWavh5zzJOX8NAAAAAAABAStOYbwAAAAAACJRIGfdaP+55ZzX1AR1Ad6+PYzP6ntV5pTQ1f+7Doau4YD2ARcgzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukiGQPOV9KXXWEk1/IZuWDT9pDVzosqqbRxy31XxU/vRZTC6UID1kSxtrStVjdEs7U0+vKoEy702ndyiIksJgzFemRP5nYDVSEt/3s9foEmaHpi/QQ1o/tN5W2a+a4jocnKBbNJyOIAIgIDu6f54A3pWVkassn2P94mP5vfaYV8Rv6W/h2gByqXvyIY3lNpwlQAAIABAACAAAAAgAAAAAABAAAAACICA2+8O4Zbp8OPga5bkDDNHLZxlg5KHs+XSj7K3iC5WZQ8GN5TacJUAACAAQAAgAAAAIABAAAAAAAAAAA=").unwrap();
             },
             _ => {
                 panic!("Invalid test psbt index {}", i);

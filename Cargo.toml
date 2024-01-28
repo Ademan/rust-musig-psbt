@@ -7,7 +7,7 @@ edition = "2018"
 bitcoin = { version = "0.30" }
 clap = { version = "4.2.7", features = [ "derive" ], optional = true }
 rand = { version = "0.8" }
-secp256k1-zkp = { git = "https://github.com/sanket1729/rust-secp256k1-zkp.git", rev = "0de61c2cc536a58f08822851528a5dfa5968d155", features = [ "actual-rand" ] }
+secp256k1-zkp = { git = "https://github.com/sanket1729/rust-secp256k1-zkp.git", rev = "60e631c24588a0c9e271badd61959294848c665d", features = [ "actual-rand" ] }
 
 [features]
 default = [ ]
