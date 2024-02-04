@@ -1,3 +1,7 @@
+use bitcoin::bip32::{
+    DerivationPath,
+};
+
 use bitcoin::network::constants::{
     Network,
 };
@@ -25,6 +29,7 @@ use musig_psbt::{
     PsbtHelper,
     PsbtUpdater,
     SpendInfoAddResult,
+    ToZkp,
 };
 
 use musig_psbt::secp256k1_zkp::{
@@ -119,14 +124,14 @@ struct UpdateSubcommand {
 impl UpdateSubcommand {
     fn run(&self, _network: Network) {
         // TODO: relax and handle stdin/stdout instead
-        let in_path = self.in_path.clone().expect("in path");
+        let in_path = self.in_path.clone().expect("get in path");
 
         let out_path = if self.in_place {
             in_path.clone()
         } else {
             // TODO: relax and handle stdin/stdout instead
             assert!(self.out_path.is_some());
-            self.out_path.clone().expect("out path")
+            self.out_path.clone().expect("get out path")
         };
 
         let secp = Secp256k1::new();
@@ -138,7 +143,7 @@ impl UpdateSubcommand {
         let mut psbt = PartiallySignedTransaction::deserialize(&psbt_bytes[..])
             .expect("success decoding psbt");
 
-        let core_context = CoreContext::new_key_spend(&zkp_secp, self.keys.to_owned(), None).expect("core context creation success");
+        let core_context = CoreContext::new_key_spend(&zkp_secp, self.keys.to_owned(), None, &DerivationPath::default()).expect("core context creation success");
 
         let add_spend_info_results = psbt.add_spend_info(&secp, &core_context)
             .expect("spend info add success");
@@ -188,13 +193,13 @@ impl AggregateSubcommand {
         let core_context = if let Some(_tap_leaf) = tap_leaf {
             unimplemented!("Script path unimplemented");
         } else {
-            CoreContext::new_key_spend(&zkp_secp, self.keys.to_owned(), merkle_root).expect("core context creation success")
+            CoreContext::new_key_spend(&zkp_secp, self.keys.to_owned(), merkle_root, &DerivationPath::default()).expect("core context creation success")
         };
 
         let pubkey = if self.untweaked {
             core_context.inner_pk
         } else {
-            core_context.agg_pk
+            core_context.xonly_key().to_zkp()
         };
 
         let compressed_pk = pubkey.public_key(ZkpParity::Even);

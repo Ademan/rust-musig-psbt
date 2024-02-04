@@ -1,3 +1,4 @@
+use bitcoin::psbt::PartiallySignedTransaction;
 use bitcoin::{
     VarInt,
 };
@@ -34,11 +35,15 @@ use secp256k1_zkp::{
     ffi::MUSIG_PUBNONCE_SERIALIZED_LEN,
 };
 
+use std::cell::RefCell;
 use std::collections::{
     BTreeMap,
+    btree_map::Entry as BTreeEntry,
+    HashSet,
     BTreeSet,
 };
 
+use std::convert::{TryInto, TryFrom};
 use std::io::{
     Cursor,
     Error as IoError,
@@ -50,9 +55,12 @@ use std::io::{
 use std::mem::{
     size_of,
 };
+use std::ops::{Deref, DerefMut};
 
 use crate::{
+    MusigPsbtFilter,
     psbt::ParticipantIndex,
+    psbt::PsbtInputUpdater,
 };
 
 const MUSIG_PARTIAL_SIGNATURE_SERIALIZED_LEN: usize = 32;
@@ -66,12 +74,14 @@ pub const PSBT_IN_MUSIG2_PARTIAL_SIG: PsbtKeyType = 0x1b;
 
 /// Newtype which is always serialized as a sequence of fixed-length items
 /// which ends when the end of the Reader is reached
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VariableLengthArray<T>(pub Vec<T>);
 
 pub type ParticipantPubkeysKey = PublicKey;
 pub type ParticipantPubkeysValue = VariableLengthArray<PublicKey>;
 pub type ParticipantPubkeysKeyValue = (ParticipantPubkeysKey, ParticipantPubkeysValue);
 
+// FIXME: .1 is the agg pk, not sure if that's what I've done throughout...
 type SigningDataKey = (PublicKey, PublicKey, Option<TapLeafHash>);
 
 pub type PublicNonceKey = SigningDataKey;
@@ -96,6 +106,25 @@ pub enum DeserializeError {
     IoError(IoError),
     DeserializeError,
     DeserializeElementError(usize),
+}
+
+#[derive(Debug)]
+/// Error when deserializing or deserializing a PSBT value
+pub enum SerializeOrDeserializeError {
+    SerializeError(SerializeError),
+    DeserializeError(DeserializeError),
+}
+
+impl From<SerializeError> for SerializeOrDeserializeError {
+    fn from(e: SerializeError) -> Self {
+        SerializeOrDeserializeError::SerializeError(e)
+    }
+}
+
+impl From<DeserializeError> for SerializeOrDeserializeError {
+    fn from(e: DeserializeError) -> Self {
+        SerializeOrDeserializeError::DeserializeError(e)
+    }
 }
 
 /// Trait which permits deserializing from Readers and serializing to Writers
@@ -485,220 +514,31 @@ impl<K: PsbtValue, V: PsbtValue> FromPsbtKeyValue for (K, V)
     }
 }
 
-fn filter_key_type<'a>(key_type: PsbtKeyType) -> impl FnMut(&(&PsbtKey, &Vec<u8>)) -> bool {
-    move |&(key, _value)| { key.type_value == key_type }
-}
-
-fn deserialize_key<'a, K, V>() -> impl FnMut((&PsbtKey, &'a V)) -> (Result<K, DeserializeError>, &'a V)
-where
-    K: PsbtValue,
-{
-    |(key, value)| (K::deserialize(&mut Cursor::new(&key.key)), value)
-}
-
-// FIXME: gross
-fn deserialize_key_second<K, V>() -> impl FnMut((&PsbtKey, V)) -> (Result<K, DeserializeError>, V)
-where
-    K: PsbtValue,
-{
-    |(key, value)| (K::deserialize(&mut Cursor::new(&key.key)), value)
-}
-
-fn deserialize_value<'a, K, V>() -> impl FnMut((K, &'a Vec<u8>)) -> (K, Result<V, DeserializeError>)
-where
-    V: PsbtValue,
-{
-    |(key, value)| (key, V::deserialize(&mut Cursor::new(&value[..])))
-}
-
-fn map_kv_results<K, V, E>() -> impl FnMut((Result<K, E>, Result<V, E>)) -> Result<(K, V), E> {
-    |tup| match tup {
-        (Ok(k), Ok(v)) => { Ok((k, v)) },
-        (Err(e), _) => { Err(e) },
-        (_, Err(e)) => { Err(e) },
-    }
-}
-
-#[derive(Debug)]
-/// Error adding an item to a PSBT input
-pub enum AddItemError {
-    SerializeError,
-    DuplicateKeyError,
-}
-
 /// Extra functionality for psbt input proprietary key/value pairs
 pub trait MusigPsbtInputSerializer {
-    // Make return collection generic? maybe just for fun/edification... later
-    fn get_participating_by_pk<F>(&self, f: F) -> Result<Vec<ParticipantPubkeysKeyValue>, DeserializeError>
-    where
-        F: FnMut(&Vec<PublicKey>) -> bool;
-
-    fn get_participating_by_agg_pk<F>(&self, f: F) -> Result<Vec<ParticipantPubkeysKeyValue>, DeserializeError>
-    where
-        F: FnMut(&PublicKey) -> bool;
-
-    fn get_public_nonces<F>(&self, f: F) -> Result<Vec<(PublicKey, PublicKey, Option<TapLeafHash>, MusigPubNonce)>, DeserializeError>
-    where
-        F: FnMut(&PublicKey, &PublicKey, Option<&TapLeafHash>) -> bool;
-
-    fn get_public_nonces_for(&self, agg_pks: &BTreeSet<(PublicKey, Option<TapLeafHash>)>) -> Result<BTreeMap<(PublicKey, Option<TapLeafHash>), BTreeMap<PublicKey, MusigPubNonce>>, DeserializeError>
-    {
-        let matching = self.get_public_nonces(|_pk, agg_pk, tap_leaf_hash|
-            agg_pks.contains(&(agg_pk.to_owned(), tap_leaf_hash.map(|&x| x)))
-        )?;
-
-        let mut result: BTreeMap<(PublicKey, Option<TapLeafHash>), BTreeMap<PublicKey, MusigPubNonce>> = BTreeMap::new();
-
-        for (pk, agg_pk, tap_leaf_hash, pubnonce) in matching.into_iter() {
-            if let Some(nonces) = result.get_mut(&(agg_pk, tap_leaf_hash)) {
-                nonces.insert(pk, pubnonce);
-            } else {
-                let mut nonces = BTreeMap::new();
-                nonces.insert(pk, pubnonce);
-
-                result.insert((agg_pk, tap_leaf_hash), nonces);
-            }
-        }
-
-        Ok(result)
-    }
-
-    fn get_partial_signatures<F>(&self, f: F) -> Result<Vec<(PublicKey, PublicKey, Option<TapLeafHash>, MusigPartialSignature)>, DeserializeError>
-    where
-        F: FnMut(&PublicKey, &PublicKey, Option<&TapLeafHash>) -> bool;
-
-    fn get_partial_signatures_for(&self, agg_pks: &BTreeSet<(PublicKey, Option<TapLeafHash>)>) -> Result<BTreeMap<(PublicKey, Option<TapLeafHash>), BTreeMap<PublicKey, MusigPartialSignature>>, DeserializeError>
-    {
-        let matching = self.get_partial_signatures(|_pk, agg_pk, tap_leaf_hash|
-            agg_pks.contains(&(agg_pk.to_owned(), tap_leaf_hash.map(|&x| x)))
-        )?;
-
-        let mut result: BTreeMap<(PublicKey, Option<TapLeafHash>), BTreeMap<PublicKey, MusigPartialSignature>> = BTreeMap::new();
-
-        for (pk, agg_pk, tap_leaf_hash, partial_sig) in matching.into_iter() {
-            if let Some(nonces) = result.get_mut(&(agg_pk, tap_leaf_hash)) {
-                nonces.insert(pk, partial_sig);
-            } else {
-                let mut nonces = BTreeMap::new();
-                nonces.insert(pk, partial_sig);
-
-                result.insert((agg_pk, tap_leaf_hash), nonces);
-            }
-        }
-
-        Ok(result)
-    }
-
     /// Serialize and add a key/value pair
-    fn add_item<K: PsbtValue, V: PsbtValue> (&mut self, key: K, value: V) -> Result<(), AddItemError>
+    fn add_item<K: PsbtValue, V: PsbtValue> (&mut self, key: K, value: V) -> Result<(), SerializeError>
         where (K, V): PsbtKeyValue;
 
-    fn add_participants(&mut self, agg_pk: PublicKey, pubkeys: &[PublicKey]) -> Result<(), AddItemError> {
+    fn add_participants(&mut self, agg_pk: PublicKey, pubkeys: &[PublicKey]) -> Result<(), SerializeError> {
         self.add_item(agg_pk, VariableLengthArray(pubkeys.to_vec()))
     }
 
-    fn add_nonce(&mut self, pubkey: PublicKey, agg_pk: PublicKey, tap_leaf: Option<TapLeafHash>, nonce: MusigPubNonce) -> Result<(), AddItemError> {
+    fn add_nonce(&mut self, pubkey: PublicKey, agg_pk: PublicKey, tap_leaf: Option<TapLeafHash>, nonce: MusigPubNonce) -> Result<(), SerializeError> {
         self.add_item((pubkey, agg_pk, tap_leaf), nonce)
     }
 
-    fn add_partial_signature(&mut self, pubkey: PublicKey, agg_pk: PublicKey, tap_leaf: Option<TapLeafHash>, sig: MusigPartialSignature) -> Result<(), AddItemError> {
+    fn add_partial_signature(&mut self, pubkey: PublicKey, agg_pk: PublicKey, tap_leaf: Option<TapLeafHash>, sig: MusigPartialSignature) -> Result<(), SerializeError> {
         self.add_item((pubkey, agg_pk, tap_leaf), sig)
     }
 }
 
 /// Extra functionality for psbt input proprietary key/value pairs
 impl MusigPsbtInputSerializer for PsbtInput {
-    fn get_participating_by_pk<F>(&self, mut f: F) -> Result<Vec<ParticipantPubkeysKeyValue>, DeserializeError>
-    where
-        F: FnMut(&Vec<PublicKey>) -> bool,
-    {
-        self.unknown.iter()
-            .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
-            .map(deserialize_value())
-            .filter(|(ref _key, ref value_result)|
-                match value_result {
-                    Err(_e) => { false },
-                    Ok(VariableLengthArray(ref pks)) => { f(pks) }
-                }
-            )
-            .map(deserialize_key_second())
-            .map(map_kv_results())
-            .collect::<Result<Vec<_>, _>>()
-    }
-
-    fn get_participating_by_agg_pk<F>(&self, mut f: F) -> Result<Vec<ParticipantPubkeysKeyValue>, DeserializeError>
-    where
-        F: FnMut(&PublicKey) -> bool,
-    {
-        self.unknown.iter()
-            .filter(filter_key_type(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS))
-            .map(deserialize_key())
-            .filter(|(ref key_result, ref _value)|
-                match key_result {
-                    Err(_e) => { false },
-                    Ok(ref found_agg_pk) => { f(found_agg_pk) }
-                }
-            )
-            .map(deserialize_value())
-            .map(map_kv_results())
-            .collect::<Result<Vec<_>, _>>()
-    }
-
-    fn get_public_nonces<F>(&self, mut f: F) -> Result<Vec<(PublicKey, PublicKey, Option<TapLeafHash>, MusigPubNonce)>, DeserializeError>
-    where
-        F: FnMut(&PublicKey, &PublicKey, Option<&TapLeafHash>) -> bool,
-    {
-        self.unknown.iter()
-            .filter(filter_key_type(PSBT_IN_MUSIG2_PUB_NONCE))
-            .map(deserialize_key::<PublicNonceKey, _>())
-            .filter(|(ref key_result, ref _value)|
-                match key_result {
-                    Err(_e) => { false },
-                    Ok((ref pubkey, ref found_agg_pk, ref tap_leaf_hash)) => {
-                        f(pubkey, found_agg_pk, tap_leaf_hash.as_ref())
-                    }
-                }
-            )
-            .map(deserialize_value())
-            .map(map_kv_results())
-            .map(|i|
-                i.map(|((pk, agg_pk, tap_leaf_hash), pub_nonce)|
-                    (pk, agg_pk, tap_leaf_hash, pub_nonce)
-                )
-             )
-            .collect::<Result<Vec<_>, _>>()
-    }
-
-    fn get_partial_signatures<F>(&self, mut f: F) -> Result<Vec<(PublicKey, PublicKey, Option<TapLeafHash>, MusigPartialSignature)>, DeserializeError>
-    where
-        F: FnMut(&PublicKey, &PublicKey, Option<&TapLeafHash>) -> bool,
-    {
-        self.unknown.iter()
-            .filter(filter_key_type(PSBT_IN_MUSIG2_PARTIAL_SIG))
-            .map(deserialize_key::<PartialSignatureKey, _>())
-            .filter(|(ref key_result, ref _value)|
-                match key_result {
-                    Err(_e) => { false },
-                    Ok((ref pubkey, ref found_agg_pk, ref tap_leaf_hash)) => {
-                        f(pubkey, found_agg_pk, tap_leaf_hash.as_ref())
-                    }
-                }
-            )
-            .map(deserialize_value())
-            .map(map_kv_results())
-            .map(|i|
-                i.map(|((pk, agg_pk, tap_leaf_hash), partial_sig)|
-                    (pk, agg_pk, tap_leaf_hash, partial_sig)
-                )
-             )
-            .collect::<Result<Vec<_>, _>>()
-    }
-
-    fn add_item<K: PsbtValue, V: PsbtValue>(&mut self, key: K, value: V) -> Result<(), AddItemError>
+    fn add_item<K: PsbtValue, V: PsbtValue>(&mut self, key: K, value: V) -> Result<(), SerializeError>
         where (K, V): PsbtKeyValue
     {
-        let (ser_key, ser_value) = (key, value).to_psbt()
-            .map_err(|_| AddItemError::SerializeError)?;
+        let (ser_key, ser_value) = (key, value).to_psbt()?;
 
         // FIXME: handle case where key is already present, is that an error? Probably not, since
         // any third party tampering could add a conflicting key to trigger an error, and any third
@@ -710,6 +550,180 @@ impl MusigPsbtInputSerializer for PsbtInput {
             .insert(ser_key, ser_value);
 
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct MusigPsbt {
+    pub psbt: PartiallySignedTransaction,
+    pub musig_inputs: Vec<MusigPsbtInput>,
+}
+
+impl Deref for MusigPsbt {
+    type Target = PartiallySignedTransaction;
+
+    fn deref(&self) -> &Self::Target {
+        &self.psbt
+    }
+}
+
+impl DerefMut for MusigPsbt {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.psbt
+    }
+}
+
+impl MusigPsbt {
+    pub fn from_psbt(psbt: PartiallySignedTransaction) -> Result<MusigPsbt, DeserializeError> {
+        let musig_inputs = psbt.inputs.iter()
+            .map(|input| MusigPsbtInput::from_input(input))
+            .collect::<Result<_, _>>()?;
+
+        Ok(Self {
+            psbt,
+            musig_inputs,
+        })
+    }
+
+    pub fn get_input(&self, index: usize) -> Option<(&PsbtInput, &MusigPsbtInput)> {
+        match (self.psbt.inputs.get(index), self.musig_inputs.get(index)) {
+            (Some(input), Some(musig_input)) => Some((input, musig_input)),
+            (None, None) => None,
+            _ => {
+                // FIXME: is this too extreme?
+                panic!("MusigPsbt inconsistent data");
+            }
+        }
+    }
+
+    pub fn iter_musig_inputs(&self) -> impl Iterator<Item = (&PsbtInput, &MusigPsbtInput)> {
+        self.inputs.iter().zip(self.musig_inputs.iter())
+    }
+
+    pub fn iter_musig_inputs_mut(&mut self) -> impl Iterator<Item = (&PsbtInput, &mut MusigPsbtInput)> {
+        self.psbt.inputs.iter().zip(self.musig_inputs.iter_mut())
+    }
+
+    pub fn update_musig<F: MusigPsbtFilter + Copy>(&mut self, other: &MusigPsbt, filter: F) -> Result<usize, DeserializeError> {
+        let results = self.musig_inputs.iter_mut()
+            .zip(other.psbt.inputs.iter().zip(other.musig_inputs.iter()))
+            .map(|(musig_input, (other_input, other_musig_input))| {
+                musig_input.update_musig(other_input, other_musig_input, filter)
+            });
+
+        // FIXME: is there a better way to sum a fallible iterator?
+        let mut sum: usize = 0;
+        for result in results {
+            sum += result?;
+        }
+
+        Ok(sum)
+    }
+
+    pub fn into_psbt(self) -> Result<PartiallySignedTransaction, SerializeError> {
+        let mut psbt = self.psbt;
+
+        for (input, musig_input) in psbt.inputs.iter_mut().zip(self.musig_inputs) {
+            musig_input.serialize_into_input(input)?;
+        }
+
+        Ok(psbt)
+    }
+}
+
+#[derive(Clone)]
+pub struct MusigPsbtInput {
+    pub participants: BTreeMap<ParticipantPubkeysKey, Vec<PublicKey>>,
+    pub public_nonce: BTreeMap<PublicNonceKey, PublicNonceValue>,
+    pub partial_signature: BTreeMap<PartialSignatureKey, PartialSignatureValue>,
+}
+
+impl MusigPsbtInput {
+    pub fn from_input(input: &PsbtInput) -> Result<MusigPsbtInput, DeserializeError> {
+        let mut participants: BTreeMap<ParticipantPubkeysKey, Vec<PublicKey>> = BTreeMap::new();
+        let mut public_nonce: BTreeMap<PublicNonceKey, PublicNonceValue> = BTreeMap::new();
+        let mut partial_signature: BTreeMap<PartialSignatureKey, PartialSignatureValue> = BTreeMap::new();
+
+        for (key, value) in input.unknown.iter() {
+            match key.type_value {
+                PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS => {
+                    let key = ParticipantPubkeysKey::deserialize(&mut Cursor::new(&key.key))?;
+                    let value = ParticipantPubkeysValue::deserialize(&mut Cursor::new(value))?;
+                    participants.insert(key, value.0);
+                }
+                PSBT_IN_MUSIG2_PUB_NONCE => {
+                    let key = PublicNonceKey::deserialize(&mut Cursor::new(&key.key))?;
+                    let value = PublicNonceValue::deserialize(&mut Cursor::new(value))?;
+                    public_nonce.insert(key, value);
+                }
+                PSBT_IN_MUSIG2_PARTIAL_SIG => {
+                    let key = PartialSignatureKey::deserialize(&mut Cursor::new(&key.key))?;
+                    let value = PartialSignatureValue::deserialize(&mut Cursor::new(value))?;
+
+                    partial_signature.insert(key, value);
+                }
+                _ => { }
+            }
+        }
+
+        Ok(MusigPsbtInput {
+            participants,
+            public_nonce,
+            partial_signature,
+        })
+    }
+
+    pub fn iter_musig_kvs<'a>(&'a self) -> impl Iterator<Item = MusigPsbtKeyValue<'a>> {
+        self.participants.iter()
+            .map(|(k, v)| MusigPsbtKeyValue::Participants((k, v)))
+            .chain(
+                self.public_nonce.iter()
+                    .map(|(k, v)| MusigPsbtKeyValue::PublicNonce((k, v)))
+            )
+            .chain(
+                self.partial_signature.iter()
+                    .map(|(k, v)| MusigPsbtKeyValue::PartialSignature((k, v)))
+            )
+    }
+
+    pub fn update(&mut self, kv: MusigPsbtKeyValue<'_>) {
+        match kv {
+            MusigPsbtKeyValue::Participants((k, v)) => { self.participants.insert(*k, v.clone()); }
+            MusigPsbtKeyValue::PublicNonce((k, v)) => { self.public_nonce.insert(*k, *v); }
+            MusigPsbtKeyValue::PartialSignature((k, v)) => { self.partial_signature.insert(*k, *v); }
+        }
+    }
+
+    pub fn serialize_into_input(&self, input: &mut PsbtInput) -> Result<(), SerializeError> {
+        for (agg_pk, participants) in self.participants.iter() {
+            input.add_participants(*agg_pk, &participants[..])?;
+        }
+
+        for ((pk, agg_pk, tap_leaf), nonce) in self.public_nonce.iter() {
+            input.add_nonce(*pk, *agg_pk, *tap_leaf, *nonce)?;
+        }
+
+        for ((pk, agg_pk, tap_leaf), sig) in self.partial_signature.iter() {
+            input.add_partial_signature(*pk, *agg_pk, *tap_leaf, *sig)?;
+        }
+
+        Ok(())
+    }
+}
+
+pub enum MusigPsbtKeyValue<'a> {
+    Participants((&'a ParticipantPubkeysKey, &'a Vec<PublicKey>)),
+    PublicNonce((&'a PublicNonceKey, &'a PublicNonceValue)),
+    PartialSignature((&'a PartialSignatureKey, &'a PartialSignatureValue)),
+}
+
+impl<'a> MusigPsbtKeyValue<'a> {
+    pub fn get_agg_pk(&self) -> &'a PublicKey {
+        match self {
+            MusigPsbtKeyValue::Participants(participants) => &participants.0,
+            MusigPsbtKeyValue::PublicNonce(pubnonce) => &pubnonce.0.1,
+            MusigPsbtKeyValue::PartialSignature(sig) => &sig.0.1,
+        }
     }
 }
 

@@ -8,6 +8,14 @@ use bitcoin::{
     Witness,
 };
 
+use bitcoin::bip32::{
+    Fingerprint,
+    ChainCode,
+    ChildNumber,
+    DerivationPath,
+    ExtendedPubKey,
+};
+
 use bitcoin::psbt::{
     Input as PsbtInput,
     PsbtSighashType,
@@ -32,11 +40,6 @@ use bitcoin::taproot::{
     TapLeafHash,
     TapNodeHash,
     TapTweakHash,
-};
-
-use crate::{
-    FromZkp,
-    ToZkp,
 };
 
 use bitcoin::secp256k1::{
@@ -66,15 +69,13 @@ use secp256k1_zkp::{
     XOnlyPublicKey as ZkpXOnlyPublicKey,
 };
 
-use crate::serialize::{
-    ParticipantPubkeysKeyValue,
-    MusigPsbtInputSerializer,
-    VariableLengthArray,
-};
-
+use std::cmp::Ordering;
 use std::collections::{
     btree_map::BTreeMap,
+    btree_map::Entry,
     btree_set::BTreeSet,
+    HashMap,
+    HashSet,
 };
 
 use std::fmt::{
@@ -82,6 +83,59 @@ use std::fmt::{
     Error as FmtError,
     Formatter,
 };
+use std::iter::{once, empty, FromIterator};
+
+use crate::{
+    DeserializeError,
+    SerializeError,
+    SerializeOrDeserializeError,
+    FromZkp,
+    PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS,
+    PSBT_IN_MUSIG2_PUB_NONCE,
+    PSBT_IN_MUSIG2_PARTIAL_SIG,
+    ToZkp,
+};
+
+use crate::serialize::{
+    MusigPsbt,
+    MusigPsbtInput,
+    MusigPsbtKeyValue,
+    ParticipantPubkeysKeyValue,
+    MusigPsbtInputSerializer,
+    VariableLengthArray,
+};
+
+// This is the precomputed result of sha256("Musig2Musig2Musig2") per the BIP
+const MUSIG_ROOT_CHAIN_CODE: [u8; 32] = [
+    0x86, 0x80, 0x87, 0xca, 0x02, 0xa6, 0xf9, 0x74, 0xc4, 0x59, 0x89, 0x24, 0xc3, 0x6b, 0x57, 0x76, 0x2d, 0x32, 0xcb, 0x45, 0x71, 0x71, 0x67, 0xe3, 0x00, 0x62, 0x2c, 0x71, 0x67, 0xe3, 0x89, 0x65
+];
+
+pub fn max_by<T, K, I, F, C>(i: I, f: F, cmp: C) -> BTreeMap<K, T>
+where
+    K: Ord,
+    I: Iterator<Item=T>,
+    F: Fn(&T) -> K,
+    C: Fn(&T, &T) -> Ordering,
+{
+    let mut result: BTreeMap<K, T> = BTreeMap::new();
+
+    for item in i {
+        let key = f(&item);
+
+        match result.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(item);
+            }
+            Entry::Occupied(mut entry) => {
+                if cmp(&entry.get(), &item) == Ordering::Less {
+                    entry.insert(item);
+                }
+            }
+        }
+    }
+
+    result
+}
 
 /// The type of the index of a participant in an aggregate signing
 pub type ParticipantIndex = u32;
@@ -123,10 +177,52 @@ impl Display for SighashError {
 /// Error tweaking keyagg cache
 pub enum TweakError {
     TweakError,
+    DerivationError,
+}
+
+pub fn musig_agg_pk_to_xpub(pk: PublicKey, network: Network) -> ExtendedPubKey {
+    ExtendedPubKey {
+        network, // Safe?
+        depth: 0,
+        parent_fingerprint: Default::default(),
+        child_number: ChildNumber::Normal{index: 0},
+        public_key: pk,
+        chain_code: ChainCode::from(MUSIG_ROOT_CHAIN_CODE),
+    }
+}
+
+// Takes an owned keyagg cache so that we cant't return an invalid keyagg_cache in case of an error
+// partway through derivation
+fn derive_keyagg<C, I>(secp: &ZkpSecp256k1<C>, mut keyagg_cache: MusigKeyAggCache, derivation_path: I) -> Result<MusigKeyAggCache, TweakError>
+where
+    C: ZkpVerification,
+    I: IntoIterator<Item=ChildNumber>,
+{
+    // FIXME: don't hard code network
+    let mut xpub = musig_agg_pk_to_xpub(keyagg_cache.agg_pk_full().from_zkp(), Network::Bitcoin);
+
+    for child_number in derivation_path.into_iter() {
+        let (tweak, chain_code) = xpub.ckd_pub_tweak(child_number)
+            .map_err(|_| TweakError::DerivationError)?;
+
+        keyagg_cache.pubkey_ec_tweak_add(secp, tweak.to_zkp())
+            .map_err(|_| TweakError::DerivationError)?;
+
+        xpub = ExtendedPubKey {
+            network: Network::Bitcoin, // Safe?
+            depth: xpub.depth + 1,
+            parent_fingerprint: Default::default(),
+            child_number,
+            chain_code,
+            public_key: keyagg_cache.agg_pk_full().from_zkp(),
+        };
+    }
+
+    Ok(keyagg_cache)
 }
 
 /// tweak a keyagg cache for a keyspend
-fn tweak_keyagg_keyspend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, keyagg_cache: &mut MusigKeyAggCache, merkle_root: Option<TapNodeHash>) -> Result<(ZkpXOnlyPublicKey, ZkpPublicKey), TweakError> {
+fn tweak_keyagg_keyspend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, keyagg_cache: &mut MusigKeyAggCache, merkle_root: Option<TapNodeHash>) -> Result<ZkpPublicKey, TweakError> {
     let inner_pk = keyagg_cache.agg_pk();
 
     let tweak = TapTweakHash::from_key_and_tweak(inner_pk.from_zkp(), merkle_root);
@@ -137,7 +233,7 @@ fn tweak_keyagg_keyspend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, keyagg_cach
     let tweaked_pk = keyagg_cache.pubkey_xonly_tweak_add(secp, tweak_key)
         .map_err(|_| TweakError::TweakError)?; // tweak negates agg pk
 
-    Ok((inner_pk, tweaked_pk))
+    Ok(tweaked_pk)
 }
 
 /// Generate the sighash to sign for a taproot input
@@ -189,10 +285,8 @@ pub fn taproot_sighash(psbt: &PartiallySignedTransaction, input_index: usize, ta
 pub struct CoreContext {
     pub participant_pubkeys: Vec<PublicKey>,
     keyagg_cache: MusigKeyAggCache,
-    pub inner_pk: ZkpXOnlyPublicKey,
     /// The compressed aggregate public key used as a lookup key in the PSBT
     pub key_agg_pk: ZkpPublicKey,
-    pub merkle_root: Option<TapNodeHash>,
     pub tap_leaf: Option<TapLeafHash>,
 }
 
@@ -201,7 +295,17 @@ pub struct CoreContext {
 pub enum CoreContextCreateError {
     InvalidTweak,
     InvalidInputIndex,
-    DeserializeError,
+    //DeserializeError,
+    Placeholder,
+}
+
+#[derive(Debug)]
+/// Error creating core context from PSBT input
+pub enum CoreContextFromInputError {
+    /// Error building the context
+    ContextCreateError(CoreContextCreateError),
+    /// PSBT input is missing a required key
+    MissingKey,
 }
 
 #[derive(Debug)]
@@ -219,50 +323,92 @@ pub enum NonceGenerateError {
     PlaceholderError,
 }
 
+/// Convenience struct to carry around script pubkey info
+/// Intended to be created by the application, never derived from the psbt
+pub struct TaprootScriptPubkey {
+    pub internal_key: XOnlyPublicKey,
+    pub merkle_root: Option<TapNodeHash>,
+}
+
+impl TaprootScriptPubkey {
+    pub fn from_participant_keys<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: Option<TapNodeHash>) -> Self {
+        let keyagg_cache = CoreContext::to_keyagg_cache(secp, participant_pubkeys.iter());
+
+        Self {
+            internal_key: keyagg_cache.agg_pk().from_zkp(),
+            merkle_root,
+        }
+    }
+    /// Calculate script pubkey
+    pub fn script_pubkey<C: Verification>(&self, secp: &Secp256k1<C>) -> ScriptBuf {
+        ScriptBuf::new_v1_p2tr(secp, self.internal_key, self.merkle_root)
+    }
+
+    /// Calculate address
+    pub fn address<C: Verification>(&self, secp: &Secp256k1<C>, network: Network) -> Address {
+        Address::p2tr(&secp, self.internal_key, self.merkle_root, network)
+    }
+}
+
 impl CoreContext {
+    pub fn from_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, pubkeys: Vec<PublicKey>, tap_leaf: Option<TapLeafHash>, derivation_path: &DerivationPath) -> Result<Self, CoreContextCreateError> {
+        if let Some(tap_leaf) = tap_leaf {
+            CoreContext::new_script_spend(secp,
+                                          pubkeys, tap_leaf, derivation_path)
+        } else {
+            CoreContext::new_key_spend(secp,
+                                       pubkeys,
+                                       input.tap_merkle_root.clone(), derivation_path)
+        }
+    }
+
     /// Create new core context
-    pub fn new_key_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: Option<TapNodeHash>) -> Result<Self, CoreContextCreateError> {
-        let mut keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
+    pub fn new_key_spend<C>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, merkle_root: Option<TapNodeHash>, derivation_path: &DerivationPath) -> Result<Self, CoreContextCreateError>
+    where
+        C: ZkpVerification,
+    {
+        let keyagg_cache = Self::to_keyagg_cache(secp, participant_pubkeys.iter());
 
         let key_agg_pk = keyagg_cache.agg_pk_full();
 
-        let (inner_pk, agg_pk) = tweak_keyagg_keyspend(secp, &mut keyagg_cache, merkle_root)
+        let mut keyagg_cache = derive_keyagg(secp, keyagg_cache, derivation_path.into_iter().cloned())
+            .map_err(|_| CoreContextCreateError::InvalidTweak)?;
+
+        let _agg_pk = tweak_keyagg_keyspend(secp, &mut keyagg_cache, merkle_root)
             .map_err(|_| CoreContextCreateError::InvalidTweak)?;
 
         Ok(CoreContext {
             participant_pubkeys: participant_pubkeys,
             keyagg_cache,
-            inner_pk,
             key_agg_pk,
-            merkle_root,
             tap_leaf: None,
         })
     }
 
     /// Create new script spend
-    pub fn new_script_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, inner_pk: XOnlyPublicKey, merkle_root: TapNodeHash, tap_leaf: TapLeafHash) -> Result<Self, CoreContextCreateError> {
-        let keyagg_cache = Self::to_keyagg_cache(secp, &participant_pubkeys);
+    pub fn new_script_spend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: Vec<PublicKey>, tap_leaf: TapLeafHash, derivation_path: &DerivationPath) -> Result<Self, CoreContextCreateError> {
+        let keyagg_cache = Self::to_keyagg_cache(secp, participant_pubkeys.iter());
 
-        let agg_pk = keyagg_cache.agg_pk_full();
+        let key_agg_pk = keyagg_cache.agg_pk_full();
 
-        // FIXME: surely wrong
+        let keyagg_cache = derive_keyagg(secp, keyagg_cache, derivation_path.into_iter().cloned())
+            .map_err(|_| CoreContextCreateError::InvalidTweak)?;
+
         Ok(CoreContext {
-            participant_pubkeys: participant_pubkeys,
+            participant_pubkeys,
             keyagg_cache,
-            inner_pk: inner_pk.to_zkp(),
-            key_agg_pk: agg_pk,
-            merkle_root: Some(merkle_root),
+            key_agg_pk,
             tap_leaf: Some(tap_leaf),
         })
     }
 
     /// Create new core contexts from psbt input
-    pub fn from_psbt_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, psbt_keyvalue: &ParticipantPubkeysKeyValue) -> Result<Vec<Self>, CoreContextCreateError> {
+    pub fn from_psbt_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, psbt_keyvalue: &ParticipantPubkeysKeyValue, derivation: DerivationPath) -> Result<Vec<Self>, CoreContextCreateError> {
         let (_agg_pk, VariableLengthArray(participant_pubkeys)) = psbt_keyvalue;
 
         let mut result: Vec<Self> = Vec::new();
 
-        if let Some(keyspend_context) = Self::from_keyspend_input(secp, input, participant_pubkeys)? {
+        if let Some(keyspend_context) = Self::from_keyspend_input(secp, input, participant_pubkeys, derivation)? {
             result.push(keyspend_context);
         }
 
@@ -271,8 +417,8 @@ impl CoreContext {
         Ok(result)
     }
 
-    fn to_keyagg_cache<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: &Vec<PublicKey>) -> MusigKeyAggCache {
-        let zkp_participant_pubkeys: Vec<ZkpPublicKey> = participant_pubkeys.iter()
+    fn to_keyagg_cache<'a, I: Iterator<Item=&'a PublicKey>, C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: I) -> MusigKeyAggCache {
+        let zkp_participant_pubkeys: Vec<ZkpPublicKey> = participant_pubkeys
             .map(|pk| pk.to_zkp())
             .collect();
 
@@ -281,25 +427,14 @@ impl CoreContext {
 
     // TODO: allow derivation too
     /// Create new core context from an input's keyspend
-    pub fn from_keyspend_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, participant_pubkeys: &[PublicKey]) -> Result<Option<Self>, CoreContextCreateError> {
+    pub fn from_keyspend_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, participant_pubkeys: &[PublicKey], derivation: DerivationPath) -> Result<Option<Self>, CoreContextCreateError> {
         Ok(Some(
             Self::new_key_spend(secp,
                 participant_pubkeys.to_owned(),
-                input.tap_merkle_root
+                input.tap_merkle_root,
+                &derivation,
             )?
         ))
-    }
-
-    /// Calculate script pubkey
-    pub fn script_pubkey<C: Verification>(&self, secp: &Secp256k1<C>) -> ScriptBuf {
-        ScriptBuf::new_v1_p2tr(secp,
-                            self.inner_pk.from_zkp(),
-                            self.merkle_root)
-    }
-
-    /// Calculate address
-    pub fn address<C: Verification>(&self, secp: &Secp256k1<C>, network: Network) -> Address {
-        Address::p2tr(&secp, self.inner_pk.from_zkp(), self.merkle_root, network)
     }
 
     /// Is this context for a keyspend
@@ -347,7 +482,7 @@ impl CoreContext {
     }
 
     /// Generate musig nonces and add public nonce to PSBT
-    pub fn add_nonce<'a, C: ZkpVerification + ZkpSigning>(&'a self, secp: &ZkpSecp256k1<C>, pubkey: PublicKey, psbt: &mut PartiallySignedTransaction, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a>, NonceGenerateError> {
+    pub fn add_nonce<'a, C: ZkpVerification + ZkpSigning>(&'a self, secp: &ZkpSecp256k1<C>, pubkey: PublicKey, psbt: &mut MusigPsbt, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a>, NonceGenerateError> {
         let psbt_key = self.psbt_key_with_pubkey(&pubkey.to_zkp());
 
         let context = self.generate_nonce(secp, pubkey, psbt, input_index, session, extra_rand)?;
@@ -358,6 +493,13 @@ impl CoreContext {
 
         input.add_item(psbt_key, context.pubnonce)
             .map_err(|_| NonceGenerateError::SerializeError)?;
+
+        // FIXME: a bit jank to maintain the parallel MusigPsbtInput as a cache but oh well...
+        // Maybe I can hide the real psbt inside and only use the cache if/until it gets serialized
+        // out
+        let musig_input = psbt.musig_inputs.get_mut(input_index)
+            .ok_or(NonceGenerateError::InvalidInputIndexError)?;
+        musig_input.public_nonce.insert(psbt_key, context.pubnonce);
 
         Ok(context)
     }
@@ -390,25 +532,30 @@ pub enum SignError {
 
 impl<'a> SignContext<'a> {
     /// Calculate partial signature
-    pub fn get_partial_signature<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, privkey: &SecretKey, psbt: &PartiallySignedTransaction, input_index: usize) -> Result<(SignatureAggregateContext<'a>, MusigPartialSignature), SignError> {
-        let input = psbt.inputs
-            .get(input_index)
+    pub fn get_partial_signature<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, privkey: &SecretKey, psbt: &MusigPsbt, input_index: usize) -> Result<(SignatureAggregateContext<'a>, MusigPartialSignature), SignError> {
+        let (input, musig_input) = psbt.get_input(input_index)
             .ok_or(SignError::InvalidInputIndexError)?;
 
         let agg_pk_set = self.core.agg_pk_set();
 
-        let all_pubnonces = input.get_public_nonces_for(&agg_pk_set)
-            .map_err(|_| SignError::DeserializeError)?;
+        let pubnonces: BTreeMap<PublicKey, MusigPubNonce> = musig_input.public_nonce.iter()
+            .filter_map(|((pk, agg_pk, tap_leaf), pub_nonce)| {
+                // FIXME: make sure we're using the right agg_pk in case of derivation
+                // bip specifies this, I think it's the un-tweaked...
+                if (*agg_pk, *tap_leaf) != (self.core.key_agg_pk.from_zkp(), self.core.tap_leaf) {
+                    return None;
+                }
 
-        let pubnonces = all_pubnonces.get(&self.core.psbt_key())
-            .ok_or(SignError::MissingNoncesError)?;
+                Some((pk.clone(), pub_nonce.clone()))
+            })
+            .collect();
 
         let sorted_nonces: Vec<_> = self.core.participant_pubkeys.iter()
-            .map(|&pk|
+            .map(|&pk| {
                  pubnonces.get(&pk)
                     .map(|&pk| pk)
                     .ok_or(SignError::MissingNonceError(pk))
-             )
+            })
             .collect::<Result<Vec<MusigPubNonce>, _>>()?;
 
         let key_pair = ZkpKeyPair::from_secret_key(secp, &privkey.to_zkp());
@@ -437,7 +584,7 @@ impl<'a> SignContext<'a> {
                 pubnonces.get(&pk)
                     .map(|&nonce| (pk, nonce))
                     .ok_or(SignError::MissingNonceError(pk))
-             )
+            )
             .collect::<Result<BTreeMap<PublicKey, MusigPubNonce>, _>>()?;
 
         Ok((
@@ -451,7 +598,7 @@ impl<'a> SignContext<'a> {
     }
 
     /// Calculate a partial signature on an input and add it to the PSBT
-    pub fn sign<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, privkey: &SecretKey, psbt: &mut PartiallySignedTransaction, input_index: usize) -> Result<SignatureAggregateContext<'a>, SignError> {
+    pub fn sign<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, privkey: &SecretKey, psbt: &mut MusigPsbt, input_index: usize) -> Result<SignatureAggregateContext<'a>, SignError> {
         let psbt_key = self.core.psbt_key_with_pubkey(&self.pubkey);
 
         let (agg_context, partial_signature) = self.get_partial_signature(secp, privkey, psbt, input_index)?;
@@ -462,6 +609,11 @@ impl<'a> SignContext<'a> {
 
         input.add_item(psbt_key, partial_signature)
             .map_err(|_| SignError::SerializeError)?;
+
+        // FIXME: still janky
+        let musig_input = psbt.musig_inputs.get_mut(input_index)
+            .ok_or(SignError::InvalidInputIndexError)?;
+        musig_input.partial_signature.insert(psbt_key, partial_signature);
 
         Ok(agg_context)
     }
@@ -493,18 +645,23 @@ pub enum SignatureAggregateError {
 
 impl<'a> SignatureAggregateContext<'a> {
     /// Validate and combine partial signatures, computing a final aggregate signature
-    pub fn get_aggregate_signature<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, psbt: &PartiallySignedTransaction, input_index: usize) -> Result<ZkpSchnorrSignature, SignatureAggregateError> {
-        let input = psbt.inputs
-            .get(input_index)
+    pub fn get_aggregate_signature<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, psbt: &MusigPsbt, input_index: usize) -> Result<ZkpSchnorrSignature, SignatureAggregateError> {
+        let (input, musig_input) = psbt.get_input(input_index)
             .ok_or(SignatureAggregateError::InvalidInputIndexError)?;
 
         let agg_pk_set = self.core.agg_pk_set();
 
-        let all_partial_signatures = input.get_partial_signatures_for(&agg_pk_set)
-            .map_err(|_| SignatureAggregateError::DeserializeError)?;
+        let partial_signatures: BTreeMap<PublicKey, MusigPartialSignature> = musig_input.partial_signature.iter()
+            .filter_map(|((pk, agg_pk, tap_leaf), partial_signature)| {
+                // FIXME: make sure we're using the right agg_pk in case of derivation
+                // bip specifies this, I think it's the un-tweaked...
+                if (*agg_pk, *tap_leaf) != (self.core.key_agg_pk.from_zkp(), self.core.tap_leaf) {
+                    return None;
+                }
 
-        let partial_signatures = all_partial_signatures.get(&self.core.psbt_key())
-            .ok_or(SignatureAggregateError::SignaturesMissingError)?;
+                Some((pk.clone(), partial_signature.clone()))
+            })
+            .collect();
 
         let ordered_signatures = self.sort_and_validate_signatures(secp, &partial_signatures)?;
 
@@ -512,8 +669,9 @@ impl<'a> SignatureAggregateContext<'a> {
     }
 
     /// Update a psbt input with a newly calculated aggregate signature
-    pub fn aggregate_signatures<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, psbt: &mut PartiallySignedTransaction, input_index: usize) -> Result<(), SignatureAggregateError> {
-        let _agg_pk = self.core.key_agg_pk.from_zkp();
+    pub fn aggregate_signatures<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, psbt: &mut MusigPsbt, input_index: usize) -> Result<(), SignatureAggregateError> {
+        let agg_pk = self.core.key_agg_pk.from_zkp();
+        let xonly_agg_pk = agg_pk.x_only_public_key().0;
         let tap_leaf = self.core.tap_leaf;
         let signature = self.get_aggregate_signature(secp, psbt, input_index)?;
 
@@ -529,10 +687,10 @@ impl<'a> SignatureAggregateContext<'a> {
             hash_ty: sighash,
         };
 
-        if let Some(tap_leaf_hash) = tap_leaf {
-            // FIXME
-            //input.tap_script_sigs.insert((agg_pk, tap_leaf_hash), schnorr_sig);
-            todo!();
+        if let Some(tap_leaf) = tap_leaf {
+            // FIXME: make sure we're using the correct x-only agg_pk
+            input.tap_script_sigs.insert((xonly_agg_pk, tap_leaf), schnorr_sig);
+            todo!()
         } else {
             input.tap_key_sig = Some(schnorr_sig);
         }
@@ -607,27 +765,6 @@ pub enum VerifyError {
 pub trait PsbtHelper {
     fn get_input_script_pubkey(&self, index: usize) -> Option<&Script>;
 
-    fn get_participating_for_pk<C: ZkpVerification>(&self, secp: &ZkpSecp256k1<C>, target_pubkey: &PublicKey) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError> {
-        self.get_participating_by_pk(secp, |pks| {
-            pks.iter()
-                .any(|found_pubkey| found_pubkey == target_pubkey)
-        })
-    }
-
-    fn get_participating_for_agg_pk<C: ZkpVerification>(&self, secp: &ZkpSecp256k1<C>, target_agg_pk: &PublicKey) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError> {
-        self.get_participating_by_agg_pk(secp, |found_agg_pk| {
-            found_agg_pk == target_agg_pk
-        })
-    }
-
-    fn get_participating_by_pk<C: ZkpVerification, F>(&self, secp: &ZkpSecp256k1<C>, f: F) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError>
-    where
-        F: FnMut(&Vec<PublicKey>) -> bool;
-
-    fn get_participating_by_agg_pk<C: ZkpVerification, F>(&self, secp: &ZkpSecp256k1<C>, f: F) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError>
-    where
-        F: FnMut(&PublicKey) -> bool;
-
     fn finalize_key_spends(&mut self);
 
     fn outpoints_map(&self) -> Result<BTreeMap<OutPoint, TxOut>, OutpointsMapError>;
@@ -649,7 +786,6 @@ impl PsbtHelper for PartiallySignedTransaction {
         if let Some(ref previous_tx) = psbt_input.non_witness_utxo {
             let input = self.unsigned_tx.input.get(index)?;
 
-            //let previous_output = previous_tx.input.get(input.previous_output.vout.into())?;
             let previous_index = input.previous_output.vout as usize;
             let previous_output: &TxOut = previous_tx.output.get(previous_index)?;
 
@@ -657,46 +793,6 @@ impl PsbtHelper for PartiallySignedTransaction {
         }
 
         return None;
-    }
-
-    fn get_participating_by_pk<C: ZkpVerification, F>(&self, secp: &ZkpSecp256k1<C>, mut f: F) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError>
-    where
-        F: FnMut(&Vec<PublicKey>) -> bool,
-    {
-        let mut result: Vec<(usize, CoreContext)> = Vec::new();
-
-        for (input_index, input) in self.inputs.iter().enumerate() {
-            let participating = input.get_participating_by_pk(&mut f)
-                .map_err(|_| CoreContextCreateError::DeserializeError)?;
-
-            for participating_kv in participating.into_iter() {
-                for ctx in CoreContext::from_psbt_input(secp, input, &participating_kv)?.into_iter() {
-                    result.push((input_index, ctx));
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
-    fn get_participating_by_agg_pk<C: ZkpVerification, F>(&self, secp: &ZkpSecp256k1<C>, mut f: F) -> Result<Vec<(usize, CoreContext)>, CoreContextCreateError>
-    where
-        F: FnMut(&PublicKey) -> bool,
-    {
-        let mut result: Vec<(usize, CoreContext)> = Vec::new();
-
-        for (input_index, input) in self.inputs.iter().enumerate() {
-            let participating = input.get_participating_by_agg_pk(&mut f)
-                .map_err(|_| CoreContextCreateError::DeserializeError)?;
-
-            for participating_kv in participating.into_iter() {
-                for ctx in CoreContext::from_psbt_input(secp, input, &participating_kv)?.into_iter() {
-                    result.push((input_index, ctx));
-                }
-            }
-        }
-
-        Ok(result)
     }
 
     fn finalize_key_spends(&mut self) {
@@ -776,24 +872,54 @@ pub enum ParticipantsAddError {
     NoScriptPubkey,
 }
 
+#[derive(Debug)]
+/// Error updating a psbt input's musig keys or values
+pub enum InputUpdateError {
+    InvalidIndex,
+    DeserializeError(DeserializeError),
+}
+
+pub trait PsbtInputUpdater {
+    fn update_musig<F: MusigPsbtFilter>(&mut self, input: &PsbtInput, musig_input: &MusigPsbtInput, filter: F) -> Result<usize, DeserializeError>;
+}
+
+impl PsbtInputUpdater for MusigPsbtInput {
+    fn update_musig<F: MusigPsbtFilter>(&mut self, input: &PsbtInput, musig_input: &MusigPsbtInput, filter: F) -> Result<usize, DeserializeError> {
+        let mut updated = 0;
+
+        for kv in musig_input.iter_musig_kvs() {
+            if filter.filter_key(&kv) {
+                match kv {
+                    MusigPsbtKeyValue::Participants((k, v)) => { self.participants.insert(*k, v.clone()); }
+                    MusigPsbtKeyValue::PublicNonce((k, v)) => { self.public_nonce.insert(*k, *v); }
+                    MusigPsbtKeyValue::PartialSignature((k, v)) => { self.partial_signature.insert(*k, *v); }
+                }
+                updated += 1;
+            }
+        }
+
+        Ok(updated)
+    }
+}
+
 /// Helper to update PSBT with additional information
 pub trait PsbtUpdater {
-    fn add_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext) -> Result<Vec<(usize, SpendInfoAddResult)>, SpendInfoAddError>;
+    fn add_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, tap_script_pubkey: &TaprootScriptPubkey) -> Result<Vec<(usize, SpendInfoAddResult)>, SpendInfoAddError>;
 
-    fn add_input_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, index: usize) -> Result<SpendInfoAddResult, SpendInfoAddError>;
+    fn add_input_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, tap_script_pubkey: &TaprootScriptPubkey, index: usize) -> Result<SpendInfoAddResult, SpendInfoAddError>;
 
-    fn add_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext) -> Result<Vec<(usize, ParticipantsAddResult)>, ParticipantsAddError>;
+    fn add_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, tap_script_pubkey: &TaprootScriptPubkey) -> Result<Vec<(usize, ParticipantsAddResult)>, ParticipantsAddError>;
 
-    fn add_input_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, index: usize) -> Result<ParticipantsAddResult, ParticipantsAddError>;
+    fn add_input_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, tap_script_pubkey: &TaprootScriptPubkey, index: usize) -> Result<ParticipantsAddResult, ParticipantsAddError>;
 }
 
 impl PsbtUpdater for PartiallySignedTransaction {
-    fn add_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext) -> Result<Vec<(usize, SpendInfoAddResult)>, SpendInfoAddError> {
+    fn add_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, tap_script_pubkey: &TaprootScriptPubkey) -> Result<Vec<(usize, SpendInfoAddResult)>, SpendInfoAddError> {
         let mut result: Vec<_> = Vec::new();
         let input_len = self.inputs.len();
 
         for index in 0..input_len {
-            let input_result = self.add_input_spend_info(secp, context, index)?;
+            let input_result = self.add_input_spend_info(secp, context, tap_script_pubkey, index)?;
 
             result.push((index, input_result));
         }
@@ -801,7 +927,7 @@ impl PsbtUpdater for PartiallySignedTransaction {
         Ok(result)
     }
 
-    fn add_input_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, index: usize) -> Result<SpendInfoAddResult, SpendInfoAddError> {
+    fn add_input_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, tap_script_pubkey: &TaprootScriptPubkey, index: usize) -> Result<SpendInfoAddResult, SpendInfoAddError> {
         let script_pubkey = self.get_input_script_pubkey(index)
             .ok_or(SpendInfoAddError::NoScriptPubkey)?
             .to_owned();
@@ -809,22 +935,22 @@ impl PsbtUpdater for PartiallySignedTransaction {
         let input = self.inputs.get_mut(index)
             .ok_or(SpendInfoAddError::InvalidIndex)?;
 
-        if script_pubkey.clone() != context.script_pubkey(secp) {
+        if script_pubkey.clone() != tap_script_pubkey.script_pubkey(secp) {
             return Ok(SpendInfoAddResult::InputNoMatch);
         }
 
         let mut internal_key_modified = false;
         let mut merkle_root_modified = false;
 
-        let tap_internal_key = Some(context.inner_pk.from_zkp());
+        let tap_internal_key = Some(&tap_script_pubkey.internal_key);
 
-        if input.tap_internal_key != tap_internal_key {
-            input.tap_internal_key = tap_internal_key;
+        if input.tap_internal_key.as_ref() != tap_internal_key {
+            input.tap_internal_key = tap_internal_key.copied();
             internal_key_modified = true;
         }
 
-        if input.tap_merkle_root != context.merkle_root {
-            input.tap_merkle_root = context.merkle_root;
+        if input.tap_merkle_root != tap_script_pubkey.merkle_root {
+            input.tap_merkle_root = tap_script_pubkey.merkle_root;
             merkle_root_modified = true;
         }
 
@@ -834,12 +960,12 @@ impl PsbtUpdater for PartiallySignedTransaction {
         })
     }
 
-    fn add_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext) -> Result<Vec<(usize, ParticipantsAddResult)>, ParticipantsAddError> {
+    fn add_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, tap_script_pubkey: &TaprootScriptPubkey) -> Result<Vec<(usize, ParticipantsAddResult)>, ParticipantsAddError> {
         let mut result: Vec<_> = Vec::new();
         let input_len = self.inputs.len();
 
         for index in 0..input_len {
-            let input_result = self.add_input_participants(secp, context, index)?;
+            let input_result = self.add_input_participants(secp, context, tap_script_pubkey, index)?;
 
             result.push((index, input_result));
         }
@@ -847,7 +973,7 @@ impl PsbtUpdater for PartiallySignedTransaction {
         Ok(result)
     }
 
-    fn add_input_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, index: usize) -> Result<ParticipantsAddResult, ParticipantsAddError> {
+    fn add_input_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, tap_script_pubkey: &TaprootScriptPubkey, index: usize) -> Result<ParticipantsAddResult, ParticipantsAddError> {
         let script_pubkey = self.get_input_script_pubkey(index)
             .ok_or(ParticipantsAddError::NoScriptPubkey)?
             .to_owned();
@@ -855,7 +981,7 @@ impl PsbtUpdater for PartiallySignedTransaction {
         let input = self.inputs.get_mut(index)
             .ok_or(ParticipantsAddError::InvalidIndex)?;
 
-        if script_pubkey.clone() != context.script_pubkey(secp) {
+        if script_pubkey.clone() != tap_script_pubkey.script_pubkey(secp) {
             return Ok(ParticipantsAddResult::InputNoMatch);
         }
 
@@ -866,3 +992,380 @@ impl PsbtUpdater for PartiallySignedTransaction {
     }
 }
 
+pub trait MusigPsbtFilter {
+    fn filter_key<'a>(&self, kv: &MusigPsbtKeyValue<'a>) -> bool;
+}
+
+impl<T: Fn(&MusigPsbtKeyValue) -> bool> MusigPsbtFilter for T {
+    fn filter_key<'a>(&self, kv: &MusigPsbtKeyValue<'a>) -> bool
+    {
+        self(kv)
+    }
+}
+
+struct FilterEntry {
+    /// Match Musig Public Nonces
+    nonces: bool,
+
+    /// Match Musig Partial Signatures
+    signatures: bool,
+
+    /// Match Musig Participants
+    participants: bool,
+
+    /// The aggregate public key match
+    agg_pk: Option<PublicKey>,
+
+    /// The subset of participant public keys to match
+    pubkeys: HashSet<PublicKey>,
+}
+
+impl MusigPsbtFilter for FilterEntry {
+    fn filter_key<'a>(&self, kv: &MusigPsbtKeyValue<'a>) -> bool
+    {
+        let type_matches = match kv {
+            MusigPsbtKeyValue::Participants(_) => self.participants,
+            MusigPsbtKeyValue::PublicNonce(_) => self.nonces,
+            MusigPsbtKeyValue::PartialSignature(_) => self.signatures,
+        };
+
+        if !type_matches {
+            return false;
+        }
+
+        if let Some(ref agg_pk) = self.agg_pk {
+            if agg_pk != kv.get_agg_pk() {
+                return false;
+            }
+        }
+
+        if !self.pubkeys.is_empty() {
+            let pubkey_matches = match kv {
+                MusigPsbtKeyValue::Participants((_agg_pk, participants)) => {
+                    // TODO: review, is this really our desired behavior? probably not imho, any()
+                    // probably makes more sense. Could also just make it be up to the caller, have
+                    // two bundles of pubkeys
+                    participants.iter().all(|pk| self.pubkeys.contains(pk))
+                }
+                MusigPsbtKeyValue::PublicNonce(((pk, agg_pk, _), _)) => self.pubkeys.contains(pk),
+                MusigPsbtKeyValue::PartialSignature(((pk, agg_pk, _), _)) => self.pubkeys.contains(pk),
+            };
+
+            if !pubkey_matches {
+                return false;
+            }
+        }
+
+        return true;
+    }
+}
+
+#[derive(Clone)]
+struct ParticipantInfo {
+    agg_xpub: ExtendedPubKey,
+    tap_leaf: Option<TapLeafHash>,
+    master_fingerprint: Fingerprint,
+    xpub_path: DerivationPath,
+    xpub: ExtendedPubKey,
+    remaining_derivation: DerivationPath,
+}
+
+fn common_prefix(a: &DerivationPath, b: &DerivationPath) -> DerivationPath {
+    a.as_ref().iter()
+        .zip(b.as_ref().iter())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _b)| *a)
+        .collect()
+}
+
+pub struct FindParticipatingExtendedKeys {
+    keys: HashMap<Fingerprint, (ExtendedPubKey, DerivationPath)>,
+}
+
+impl FindParticipatingExtendedKeys {
+    pub fn from_global_xpubs<'a, I: Iterator<Item=(&'a Fingerprint, &'a ExtendedPubKey, &'a DerivationPath)>, C: Verification>(secp: &Secp256k1<C>, known_xprivs: I, psbt: &PartiallySignedTransaction) -> Self {
+        let mut known_xprivs: Vec<(Fingerprint, ExtendedPubKey, DerivationPath, usize)> = known_xprivs
+            .map(|(fingerprint, xpub, derivation_path)| {
+                psbt.xpub.iter()
+                    .filter_map(move |(found_xpub, (found_fingerprint, found_derivation_path))| {
+                        if found_fingerprint != fingerprint {
+                            return None;
+                        }
+
+                        let prefix_path = common_prefix(&derivation_path, &found_derivation_path);
+                        if prefix_path.len() != derivation_path.len() {
+                            return None;
+                        }
+
+                        let remaining_derivation: DerivationPath =
+                            derivation_path.as_ref().iter()
+                                .skip(prefix_path.len())
+                                .cloned()
+                                .collect();
+
+                        let derived_xpub = found_xpub.derive_pub(secp, &remaining_derivation)
+                            .ok()?;
+
+                        if derived_xpub == *found_xpub {
+                            Some(
+                                (fingerprint.clone(), xpub.clone(), derivation_path.clone(), remaining_derivation.len())
+                            )
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .flatten()
+            .collect();
+
+        known_xprivs.sort_by_key(|(_fingerprint, _xpub, _derivation_path, remaining_path_length)| *remaining_path_length);
+
+        let known_xprivs = known_xprivs.into_iter()
+            .map(|(fingerprint, xpub, derivation_path, _remaining_path_length)| (fingerprint, (xpub, derivation_path)));
+
+        Self {
+            keys: HashMap::from_iter(known_xprivs),
+        }
+    }
+
+    fn iter_participating<'a, 'secp, 'psbt, C: Verification>(&'a self, secp: &'secp Secp256k1<C>, input: &'psbt PsbtInput, musig_input: &'psbt MusigPsbtInput) -> impl Iterator<Item=(ParticipantInfo, DerivationPath)> + 'a
+    where
+        'secp: 'a,
+        'psbt: 'a,
+    {
+        // FIXME: clean up this mess... somehow...
+        input.tap_key_origins.iter()
+            // enumerate all possible tap derivations, including the key path
+            // The caller will need to filter the key path if it is not desired.
+            .map(|(pubkey, (tap_leaves, (fingerprint, derivation)))| {
+                tap_leaves.iter()
+                    .map(move |tap_leaf| (pubkey, Some(tap_leaf), fingerprint, derivation))
+                    .chain(once((pubkey, None, fingerprint, derivation)))
+            })
+            .flatten()
+            // filter out tap derivations that don't match a key fingerprint we know
+            // filter out tap derivations where the derived key doesn't match the expected value
+            // (ignoring parity, since it is not represented in tap derivations)
+            // filter out tap derivations where the derived key does not participate in a musig
+            // aggregate key
+            // filter out tap derivations where the aggregate key is not used
+            //
+            .filter_map(move |(found_derived_pubkey, tap_leaf, fingerprint, derivation)| {
+                self.keys.get(fingerprint)
+                    .and_then(move |(xpub, xpub_path)| {
+                        let prefix_path = common_prefix(&xpub_path, &derivation);
+
+                        // Check if the derivation path is equal to or derived from this known xpub
+                        if prefix_path.len() != xpub_path.len() {
+                            return None;
+                        }
+
+                        let remaining_derivation: DerivationPath =
+                            derivation.as_ref().iter()
+                                .skip(prefix_path.len())
+                                .cloned()
+                                .collect();
+
+                        let derived_xpub = xpub.derive_pub(secp, &remaining_derivation)
+                            .ok()?;
+
+                        let derived_pubkey = derived_xpub.to_pub().inner;
+
+                        let (parity_insensitive_pk, _parity) = derived_pubkey.x_only_public_key();
+
+                        // check if derived pubkey matches
+                        if *found_derived_pubkey != parity_insensitive_pk {
+                            return None;
+                        }
+
+                        Some((fingerprint, xpub, xpub_path, remaining_derivation, derived_pubkey, tap_leaf))
+                    })
+            })
+            // generate a participation context for
+            // derived keys that participate in a musig signing
+            .map(move |(fingerprint, xpub, xpub_path, remaining_derivation, derived_pubkey, tap_leaf)| {
+                musig_input.participants.iter()
+                    .filter_map(move |(agg_pk, pubkeys)| {
+                        if pubkeys.contains(&derived_pubkey) {
+                            // TODO: I think we could eliminate several copies
+                            // throughout this code by returning references
+                            Some(ParticipantInfo {
+                                // FIXME: don't hard code network
+                                agg_xpub: musig_agg_pk_to_xpub(agg_pk.to_owned(), Network::Bitcoin),
+                                tap_leaf: tap_leaf.copied(),
+                                master_fingerprint: fingerprint.to_owned(),
+                                xpub_path: xpub_path.to_owned(),
+                                xpub: xpub.to_owned(),
+                                remaining_derivation: remaining_derivation.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .flatten()
+            // Find matching derivations from the agg_pk
+            .map(move |participation| {
+                input.tap_key_origins.iter()
+                    // FIXME: should we do this for every leaf hash in leaf_hashes regardless of
+                    // the participant key leaf hashes?
+                    .filter_map(move |(found_agg_pk, (leaf_hashes, (new_fingerprint, agg_pk_derivation)))| {
+                        // Check that the fingerprint matches
+                        if *new_fingerprint != participation.agg_xpub.fingerprint() {
+                            return None;
+                        }
+
+                        let leaf_matches = participation.tap_leaf
+                            .map(|tap_leaf| leaf_hashes.contains(&tap_leaf))
+                            // Always match the key path
+                            .unwrap_or(true);
+
+                        // Check if this derivation info matches our tap leaf
+                        // If we are currently doing the key path always match
+                        if !leaf_matches {
+                            return None;
+                        }
+
+                        let (parity_insensitive_agg_pk, _parity) =
+                            participation.agg_xpub
+                            .derive_pub(secp, agg_pk_derivation)
+                            .ok()?
+                            .public_key
+                            .x_only_public_key();
+
+                        // Check if this derived key matches our agg pk
+                        if *found_agg_pk != parity_insensitive_agg_pk {
+                            return None;
+                        }
+
+                        let matches_internal_key = input.tap_internal_key
+                            .map(|ik| ik == parity_insensitive_agg_pk)
+                            .unwrap_or(true);
+
+                        // If internal key info is present, ensure this
+                        // aggregate key matches
+                        // XXX: If the internal key info is not present, we
+                        // treat it as a match, this might be undesirable,
+                        // revisit this decision
+                        if participation.tap_leaf.is_none() && !matches_internal_key {
+                            return None;
+                        }
+
+                        Some((participation.clone(), agg_pk_derivation.clone()))
+                    })
+            })
+            .flatten()
+    }
+}
+
+impl FromIterator<(Fingerprint, (ExtendedPubKey, DerivationPath))> for FindParticipatingExtendedKeys {
+    fn from_iter<T: IntoIterator<Item=(Fingerprint, (ExtendedPubKey, DerivationPath))>>(iter: T) -> Self {
+        Self { keys: FromIterator::from_iter(iter) }
+    }
+}
+
+pub struct FindParticipatingKeys {
+    keys: HashSet<PublicKey>,
+}
+
+impl FindParticipatingKeys {
+    pub fn new(keys: HashSet<PublicKey>) -> Self {
+        Self { keys }
+    }
+
+    pub fn from_key(key: PublicKey) -> Self {
+        Self::from_iter(once(key))
+    }
+
+    fn iter_participating<'a, 'secp, 'psbt, C: Verification>(&'a self, secp: &'secp Secp256k1<C>, input: &'psbt PsbtInput, musig_input: &'psbt MusigPsbtInput) -> impl Iterator<Item=(Vec<PublicKey>, PublicKey, Option<TapLeafHash>, DerivationPath)> + 'a
+    where
+        'secp: 'a,
+        'psbt: 'a,
+    {
+        musig_input.participants.iter()
+            .flat_map(move |(agg_pk, pubkeys)| {
+                pubkeys.iter()
+                    .filter_map(move |participating_pubkey| {
+                        if self.keys.contains(participating_pubkey) {
+                            Some((agg_pk, pubkeys, participating_pubkey))
+                        } else {
+                            None
+                        }
+                    })
+            })
+            // Find matching derivations from the agg_pk
+            .flat_map(move |(agg_pk, pubkeys, participating_pubkey)| {
+                input.tap_key_origins.iter()
+                    .flat_map(move |(found_agg_pk, (leaf_hashes, (new_fingerprint, agg_pk_derivation)))| {
+
+                        leaf_hashes.iter()
+                            .map(|leaf_hash| Some(leaf_hash))
+                            .chain(once(None)) // Include key path
+                            .filter_map(move |leaf_hash| {
+                                // FIXME: don't hard code network
+                                let agg_xpub = musig_agg_pk_to_xpub(agg_pk.clone(), Network::Bitcoin);
+
+                                // Check that the fingerprint matches
+                                if *new_fingerprint != agg_xpub.fingerprint() {
+                                    return None;
+                                }
+
+                                let (parity_insensitive_agg_pk, _parity) = agg_xpub
+                                    .derive_pub(secp, agg_pk_derivation)
+                                    .ok()?
+                                    .public_key
+                                    .x_only_public_key();
+
+                                // Check if this derived key matches our agg pk
+                                if *found_agg_pk != parity_insensitive_agg_pk {
+                                    return None;
+                                }
+
+                                let matches_internal_key = input.tap_internal_key
+                                    .map(|ik| ik == parity_insensitive_agg_pk)
+                                    .unwrap_or(true);
+
+                                // TODO: I think we can return references if we play our lifetimes
+                                // right
+                                // FIXME: correct?
+                                if matches_internal_key {
+                                    Some((pubkeys.clone(), participating_pubkey.clone(), leaf_hash.cloned(), agg_pk_derivation.clone()))
+                                } else {
+                                    None
+                                }
+                            })
+                    })
+            })
+    }
+
+    pub fn iter_participating_input_context<'a, 'secp, C: Verification, ZC: ZkpVerification>(&'a self, secp: &'secp Secp256k1<C>, zkp_secp: &'secp ZkpSecp256k1<ZC>, input: &'a PsbtInput, musig_input: &'a MusigPsbtInput) -> impl Iterator<Item=Result<(PublicKey, CoreContext), CoreContextCreateError>> + 'a
+    where
+        'secp: 'a,
+    {
+        self.iter_participating(secp, input, musig_input)
+            .map(move |(pubkeys, participating_pubkey, tap_leaf, derivation)|
+                CoreContext::from_input(zkp_secp, input, pubkeys.clone(), tap_leaf.clone(), &derivation)
+                        .map(|context| (participating_pubkey, context))
+            )
+    }
+
+    pub fn iter_participating_context<'a, 'secp, 'r, C: Verification, ZC: ZkpVerification>(&'a self, secp: &'secp Secp256k1<C>, zkp_secp: &'secp ZkpSecp256k1<ZC>, psbt: &'r MusigPsbt) -> impl Iterator<Item=(usize, Result<(PublicKey, CoreContext), CoreContextCreateError>)> + 'r
+    where
+        'secp: 'r,
+        'a: 'r,
+    {
+        psbt.iter_musig_inputs()
+            .enumerate()
+            .map(move |(index, (musig_input, input))| {
+                self.iter_participating_input_context(secp, zkp_secp, musig_input, input)
+                    .map(move |result| (index, result))
+            })
+            .flatten()
+    }
+}
+
+impl FromIterator<PublicKey> for FindParticipatingKeys {
+    fn from_iter<T: IntoIterator<Item=PublicKey>>(iter: T) -> Self {
+        Self { keys: FromIterator::from_iter(iter) }
+    }
+}

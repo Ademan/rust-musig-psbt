@@ -35,17 +35,22 @@ use std::time::{
 pub use crate::psbt::{
     CoreContextCreateError,
     CoreContext,
-    SignContext,
-    SignatureAggregateContext,
+    FindParticipatingExtendedKeys,
+    FindParticipatingKeys,
+    musig_agg_pk_to_xpub,
+    MusigPsbtFilter,
     NonceGenerateError,
     OutpointsMapError,
     ParticipantIndex,
     ParticipantsAddResult,
     PsbtHelper,
     PsbtUpdater,
-    SignError,
+    SignatureAggregateContext,
     SignatureAggregateError,
+    SignContext,
+    SignError,
     SpendInfoAddResult,
+    TaprootScriptPubkey,
     VerifyError,
 };
 
@@ -55,7 +60,11 @@ pub use crate::serialize::{
     PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS,
     PSBT_IN_MUSIG2_PUB_NONCE,
     PSBT_IN_MUSIG2_PARTIAL_SIG,
+    MusigPsbt,
+    MusigPsbtInput,
+    MusigPsbtKeyValue,
     SerializeError,
+    SerializeOrDeserializeError,
 };
 
 /// Trait for converting from libsecp256k1-zkp types to libsecp256k1 types
@@ -184,13 +193,6 @@ impl ExtraRand {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(feature="test",))]
-    compile_error!("Enable feature \"test\" to build and run tests. See Adjacent comments for details.");
-    // Cargo doesn't currently provide a way to automatically enable features for tests, and we
-    // need to enable bitcoin/bitcoinconsensus to validate transactions.
-    // There is a workaround but it has some minor drawbacks, so I'm simply alerting you early to
-    // this requirement.
-
     use bitcoin::secp256k1::{
         PublicKey,
         Secp256k1,
@@ -206,12 +208,21 @@ mod tests {
         Secp256k1 as ZkpSecp256k1,
     };
 
+    use std::iter::{
+        FromIterator,
+        once,
+    };
+
     use std::str::{
         FromStr,
     };
 
     use crate::{
+        CoreContext,
         PsbtHelper,
+        MusigPsbt,
+        MusigPsbtInput,
+        FindParticipatingKeys,
     };
 
     fn hex_privkey(hex: &str) -> SecretKey {
@@ -250,7 +261,7 @@ mod tests {
     fn get_test_psbt(i: usize) -> PartiallySignedTransaction {
         match i {
             1 => {
-                return PartiallySignedTransaction::from_str("cHNidP8BAHECAAAAAVWeGvTcMyC0uT9CncnUpsDRzlJfELl63dH4hx2tx+xcAAAAAAD9////AriCAQAAAAAAFgAUw4SYk4+KJyWc+4EDAxjVcEiXVYgT3roAAAAAABYAFB20v/TvT7Mnod3CWavh5zzJOX8NAAAAAAABAStOYbwAAAAAACJRIGfdaP+55ZzX1AR1Ad6+PYzP6ntV5pTQ1f+7Doau4YD2ARcgzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukiGQPOV9KXXWEk1/IZuWDT9pDVzosqqbRxy31XxU/vRZTC6UID1kSxtrStVjdEs7U0+vKoEy702ndyiIksJgzFemRP5nYDVSEt/3s9foEmaHpi/QQ1o/tN5W2a+a4jocnKBbNJyOIAIgIDu6f54A3pWVkassn2P94mP5vfaYV8Rv6W/h2gByqXvyIY3lNpwlQAAIABAACAAAAAgAAAAAABAAAAACICA2+8O4Zbp8OPga5bkDDNHLZxlg5KHs+XSj7K3iC5WZQ8GN5TacJUAACAAQAAgAAAAIABAAAAAAAAAAA=").unwrap();
+                return PartiallySignedTransaction::from_str("cHNidP8BAIkCAAAAAXhVYaAW/V44yVXrxatXaQ6n/200MkqLY11ChcilXzT+AAAAAAD9////AgDh9QUAAAAAIlEgZ91o/7nlnNfUBHUB3r49jM/qe1XmlNDV/7sOhq7hgPZlEBAkAQAAACJRIGfdaP+55ZzX1AR1Ad6+PYzP6ntV5pTQ1f+7Doau4YD2AAAAAE8BBDWHzwAAAAAAAAAAAA1AItJh9Nhh7/N92XW3W2vMfit2gCOOO1j/6HKuwbgvA63PIu31XxCfhL/etap2KRiSMCOEOUUG9f5u5StDYJXIBMBhd8wAAQErAPIFKgEAAAAiUSBn3Wj/ueWc19QEdQHevj2Mz+p7VeaU0NX/uw6GruGA9iEWVSEt/3s9foEmaHpi/QQ1o/tN5W2a+a4jocnKBbNJyOIZAMBhd8xWAACAAQAAgAAAAIAFAAAAAAAAACEWzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukFAAbYZgchFtZEsba0rVY3RLO1NPryqBMu9Np3coiJLCYMxXpkT+Z2GQDAYXfMVgAAgAEAAIAAAACABAAAAAAAAAABFyDOV9KXXWEk1/IZuWDT9pDVzosqqbRxy31XxU/vRZTC6SIZA85X0pddYSTX8hm5YNP2kNXOiyqptHHLfVfFT+9FlMLpQgPWRLG2tK1WN0SztTT68qgTLvTad3KIiSwmDMV6ZE/mdgNVIS3/ez1+gSZoemL9BDWj+03lbZr5riOhycoFs0nI4gABBSDOV9KXXWEk1/IZuWDT9pDVzosqqbRxy31XxU/vRZTC6SEHzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukFAAbYZgcAAQUgzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukhB85X0pddYSTX8hm5YNP2kNXOiyqptHHLfVfFT+9FlMLpBQAG2GYHAA==").unwrap();
             },
             _ => {
                 panic!("Invalid test psbt index {}", i);
@@ -259,7 +270,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature="test",)]
     fn test_basic() {
         let secp = ZkpSecp256k1::new();
         let normal_secp = Secp256k1::new();
@@ -269,36 +279,52 @@ mod tests {
         let PartyData { privkey: privkey1, pubkey: pubkey1 } = get_test_party(4);
         let PartyData { privkey: privkey2, pubkey: pubkey2 } = get_test_party(5);
 
-        let participating1 = psbt.get_participating_for_pk(&secp, &pubkey1)
-            .expect("results");
+        let mut musig_psbt = MusigPsbt::from_psbt(psbt).unwrap();
+
+        let participating1 = FindParticipatingKeys::from_iter(once(pubkey1.clone()));
+        let participating1: Vec<CoreContext> = participating1.iter_participating_context(&normal_secp, &secp, &musig_psbt)
+            .map(|(input_index, arg)| {
+                let (pk, context) = arg.expect("valid context");
+                assert_eq!(pk, pubkey1);
+                context
+            })
+            .collect();
+
         assert_eq!(participating1.len(), 1);
 
-        let participating2 = psbt.get_participating_for_pk(&secp, &pubkey2)
-            .expect("results");
+        let participating2 = FindParticipatingKeys::from_iter(once(pubkey2.clone()));
+        let participating2: Vec<CoreContext> = participating2.iter_participating_context(&normal_secp, &secp, &musig_psbt)
+            .map(|(input_index, arg)| {
+                let (pk, context) = arg.expect("valid context");
+                assert_eq!(pk, pubkey2);
+                context
+            })
+            .collect();
         assert_eq!(participating2.len(), 1);
 
-        let (idx1, ref corectx1) = participating1[0];
-        let (idx2, ref corectx2) = participating2[0];
+        // FIXME: add iter_participating to entire PSBT to be compatible with this format
+        let (idx1, ref corectx1) = (0, &participating1[0]);
+        let (idx2, ref corectx2) = (0, &participating2[0]);
 
         assert_eq!(idx1, idx2);
-        assert_eq!(corectx1.script_pubkey(&normal_secp), corectx2.script_pubkey(&normal_secp));
+        assert_eq!(corectx1.xonly_key(), corectx2.xonly_key());
 
         let extra_rand = [0u8; 32];
         let session1 = MusigSessionId::assume_unique_per_nonce_gen([1u8; 32]);
         let session2 = MusigSessionId::assume_unique_per_nonce_gen([2u8; 32]);
 
-        let signctx1 = corectx1.add_nonce(&secp, pubkey1, &mut psbt, idx1, session1, extra_rand)
+        let signctx1 = corectx1.add_nonce(&secp, pubkey1, &mut musig_psbt, idx1, session1, extra_rand)
             .expect("context 1 add nonce");
-        let signctx2 = corectx2.add_nonce(&secp, pubkey2, &mut psbt, idx2, session2, extra_rand)
+        let signctx2 = corectx2.add_nonce(&secp, pubkey2, &mut musig_psbt, idx2, session2, extra_rand)
             .expect("context 2 add nonce");
 
-        let sigaggctx1 = signctx1.sign(&secp, &privkey1, &mut psbt, idx1)
+        let sigaggctx1 = signctx1.sign(&secp, &privkey1, &mut musig_psbt, idx1)
             .expect("context 1 sign success");
-        let sigaggctx2 = signctx2.sign(&secp, &privkey2, &mut psbt, idx2)
+        let sigaggctx2 = signctx2.sign(&secp, &privkey2, &mut musig_psbt, idx2)
             .expect("context 2 sign success");
 
-        let mut sigaggpsbt1 = psbt.clone();
-        let mut sigaggpsbt2 = psbt.clone();
+        let mut sigaggpsbt1 = musig_psbt.clone();
+        let mut sigaggpsbt2 = musig_psbt.clone();
 
         sigaggctx1.aggregate_signatures(&secp, &mut sigaggpsbt1, idx1)
             .expect("context 1 aggregate signatures");
@@ -311,8 +337,8 @@ mod tests {
         sigaggpsbt1.verify()
             .expect("validate transaction");
 
-        let tx1 = sigaggpsbt1.extract_tx();
-        let tx2 = sigaggpsbt2.extract_tx();
+        let tx1 = sigaggpsbt1.psbt.extract_tx();
+        let tx2 = sigaggpsbt2.psbt.extract_tx();
 
         assert_eq!(tx1, tx2);
     }
