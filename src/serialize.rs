@@ -1,7 +1,4 @@
-use bitcoin::psbt::PartiallySignedTransaction;
-use bitcoin::{
-    VarInt,
-};
+use bitcoin::VarInt;
 
 use bitcoin::consensus::encode::{
     Decodable,
@@ -11,13 +8,12 @@ use bitcoin::consensus::encode::{
 use bitcoin::psbt::{
     Input as PsbtInput,
     raw::Key as PsbtKey,
+    PartiallySignedTransaction,
 };
 
 use bitcoin::secp256k1::{
     PublicKey,
     constants::PUBLIC_KEY_SIZE,
-    constants::SCHNORR_PUBLIC_KEY_SIZE,
-    XOnlyPublicKey,
 };
 
 use bitcoin::bip32::{
@@ -25,9 +21,7 @@ use bitcoin::bip32::{
     KeySource,
 };
 
-use bitcoin::taproot::{
-    TapLeafHash,
-};
+use bitcoin::taproot::TapLeafHash;
 
 use secp256k1_zkp::{
     MusigPartialSignature,
@@ -35,15 +29,8 @@ use secp256k1_zkp::{
     ffi::MUSIG_PUBNONCE_SERIALIZED_LEN,
 };
 
-use std::cell::RefCell;
-use std::collections::{
-    BTreeMap,
-    btree_map::Entry as BTreeEntry,
-    HashSet,
-    BTreeSet,
-};
+use std::collections::BTreeMap;
 
-use std::convert::{TryInto, TryFrom};
 use std::io::{
     Cursor,
     Error as IoError,
@@ -52,25 +39,30 @@ use std::io::{
     Write,
 };
 
-use std::mem::{
-    size_of,
+use std::mem::size_of;
+
+use std::ops::{
+    Deref,
+    DerefMut,
 };
-use std::ops::{Deref, DerefMut};
 
 use crate::{
     MusigPsbtFilter,
-    psbt::ParticipantIndex,
     psbt::PsbtInputUpdater,
 };
 
 const MUSIG_PARTIAL_SIGNATURE_SERIALIZED_LEN: usize = 32;
 
 // FIXME: psbt key types are actually var ints, once rust-bitcoin updates, update here
+/// The type of psbt keys
 pub type PsbtKeyType = u8;
 
-pub const PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS: PsbtKeyType = 0x19;
-pub const PSBT_IN_MUSIG2_PUB_NONCE: PsbtKeyType = 0x1a;
-pub const PSBT_IN_MUSIG2_PARTIAL_SIG: PsbtKeyType = 0x1b;
+/// The type of the index of a participant in an aggregate signing
+pub type ParticipantIndex = u32;
+
+pub const PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS: PsbtKeyType = 0x1a;
+pub const PSBT_IN_MUSIG2_PUB_NONCE: PsbtKeyType = 0x1b;
+pub const PSBT_IN_MUSIG2_PARTIAL_SIG: PsbtKeyType = 0x1c;
 
 /// Newtype which is always serialized as a sequence of fixed-length items
 /// which ends when the end of the Reader is reached
@@ -81,7 +73,7 @@ pub type ParticipantPubkeysKey = PublicKey;
 pub type ParticipantPubkeysValue = VariableLengthArray<PublicKey>;
 pub type ParticipantPubkeysKeyValue = (ParticipantPubkeysKey, ParticipantPubkeysValue);
 
-// FIXME: .1 is the agg pk, not sure if that's what I've done throughout...
+// XXX: .1 is the agg pk
 type SigningDataKey = (PublicKey, PublicKey, Option<TapLeafHash>);
 
 pub type PublicNonceKey = SigningDataKey;
@@ -304,28 +296,6 @@ impl<T> PsbtValue for Vec<T>
     }
 }
 
-impl PsbtValue for XOnlyPublicKey {
-    fn serialize<W: Write>(&self, writer: &mut W) -> Result<(), SerializeError> {
-        let pubkey_bytes = self.serialize();
-
-        writer.write_all(&pubkey_bytes)
-            .map_err(|e| SerializeError::IoError(e))?;
-
-        Ok(())
-    }
-
-    fn deserialize<R: Read>(reader: &mut R) -> Result<Self, DeserializeError> {
-        let mut pubkey_bytes = [0u8; SCHNORR_PUBLIC_KEY_SIZE];
-        reader.read_exact(&mut pubkey_bytes)
-            .map_err(|e| DeserializeError::IoError(e))?;
-
-        let pubkey = XOnlyPublicKey::from_slice(&pubkey_bytes)
-            .map_err(|_| DeserializeError::DeserializeError)?;
-
-        Ok(pubkey)
-    }
-}
-
 impl PsbtValue for PublicKey {
     fn serialize<W: Write>(&self, writer: &mut W) -> Result<(), SerializeError> {
         let pubkey_bytes = self.serialize();
@@ -474,11 +444,6 @@ pub trait ToPsbtKeyValue: Sized {
     fn to_psbt(&self) -> Result<(PsbtKey, Vec<u8>), SerializeError>;
 }
 
-/// Trait for serializing to a PSBT key/value pair
-pub trait FromPsbtKeyValue: Sized {
-    fn from_psbt(key: &PsbtKey, value: &Vec<u8>) -> Result<Self, DeserializeError>;
-}
-
 impl<K: PsbtValue, V: PsbtValue> ToPsbtKeyValue for (K, V)
     where (K, V): PsbtKeyValue
 {
@@ -493,24 +458,6 @@ impl<K: PsbtValue, V: PsbtValue> ToPsbtKeyValue for (K, V)
             type_value: Self::KEY_TYPE as PsbtKeyType,
             key: key_buf,
         }, value_buf))
-    }
-}
-
-impl<K: PsbtValue, V: PsbtValue> FromPsbtKeyValue for (K, V)
-    where (K, V): PsbtKeyValue
-{
-    fn from_psbt(key: &PsbtKey, value: &Vec<u8>) -> Result<Self, DeserializeError> {
-        if key.type_value != Self::KEY_TYPE as u8 {
-            return Err(DeserializeError::DeserializeError);
-        }
-
-        let k = PsbtValue::deserialize(&mut Cursor::new(&key.key))
-            .map_err(|_e| DeserializeError::DeserializeError)?;
-
-        let v = PsbtValue::deserialize(&mut Cursor::new(value))
-            .map_err(|_e| DeserializeError::DeserializeError)?;
-
-        Ok((k, v))
     }
 }
 

@@ -28,9 +28,7 @@ use bitcoin::hashes::sha256::{
     HashEngine as Sha256HashEngine,
 };
 
-use std::time::{
-    UNIX_EPOCH,
-};
+use std::time::UNIX_EPOCH;
 
 pub use crate::psbt::{
     CoreContextCreateError,
@@ -41,7 +39,6 @@ pub use crate::psbt::{
     MusigPsbtFilter,
     NonceGenerateError,
     OutpointsMapError,
-    ParticipantIndex,
     ParticipantsAddResult,
     PsbtHelper,
     PsbtUpdater,
@@ -57,12 +54,10 @@ pub use crate::psbt::{
 pub use crate::serialize::{
     DeserializeError,
     MusigPsbtInputSerializer,
-    PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS,
-    PSBT_IN_MUSIG2_PUB_NONCE,
-    PSBT_IN_MUSIG2_PARTIAL_SIG,
     MusigPsbt,
     MusigPsbtInput,
     MusigPsbtKeyValue,
+    ParticipantIndex,
     SerializeError,
     SerializeOrDeserializeError,
 };
@@ -199,9 +194,7 @@ mod tests {
         SecretKey,
     };
 
-    use bitcoin::psbt::{
-        PartiallySignedTransaction,
-    };
+    use bitcoin::psbt::PartiallySignedTransaction;
 
     use secp256k1_zkp::{
         MusigSessionId,
@@ -213,15 +206,12 @@ mod tests {
         once,
     };
 
-    use std::str::{
-        FromStr,
-    };
+    use std::str::FromStr;
 
     use crate::{
         CoreContext,
         PsbtHelper,
         MusigPsbt,
-        MusigPsbtInput,
         FindParticipatingKeys,
     };
 
@@ -261,7 +251,7 @@ mod tests {
     fn get_test_psbt(i: usize) -> PartiallySignedTransaction {
         match i {
             1 => {
-                return PartiallySignedTransaction::from_str("cHNidP8BAIkCAAAAAXhVYaAW/V44yVXrxatXaQ6n/200MkqLY11ChcilXzT+AAAAAAD9////AgDh9QUAAAAAIlEgZ91o/7nlnNfUBHUB3r49jM/qe1XmlNDV/7sOhq7hgPZlEBAkAQAAACJRIGfdaP+55ZzX1AR1Ad6+PYzP6ntV5pTQ1f+7Doau4YD2AAAAAE8BBDWHzwAAAAAAAAAAAA1AItJh9Nhh7/N92XW3W2vMfit2gCOOO1j/6HKuwbgvA63PIu31XxCfhL/etap2KRiSMCOEOUUG9f5u5StDYJXIBMBhd8wAAQErAPIFKgEAAAAiUSBn3Wj/ueWc19QEdQHevj2Mz+p7VeaU0NX/uw6GruGA9iEWVSEt/3s9foEmaHpi/QQ1o/tN5W2a+a4jocnKBbNJyOIZAMBhd8xWAACAAQAAgAAAAIAFAAAAAAAAACEWzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukFAAbYZgchFtZEsba0rVY3RLO1NPryqBMu9Np3coiJLCYMxXpkT+Z2GQDAYXfMVgAAgAEAAIAAAACABAAAAAAAAAABFyDOV9KXXWEk1/IZuWDT9pDVzosqqbRxy31XxU/vRZTC6SIZA85X0pddYSTX8hm5YNP2kNXOiyqptHHLfVfFT+9FlMLpQgPWRLG2tK1WN0SztTT68qgTLvTad3KIiSwmDMV6ZE/mdgNVIS3/ez1+gSZoemL9BDWj+03lbZr5riOhycoFs0nI4gABBSDOV9KXXWEk1/IZuWDT9pDVzosqqbRxy31XxU/vRZTC6SEHzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukFAAbYZgcAAQUgzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukhB85X0pddYSTX8hm5YNP2kNXOiyqptHHLfVfFT+9FlMLpBQAG2GYHAA==").unwrap();
+                return PartiallySignedTransaction::from_str("cHNidP8BAIkCAAAAAXhVYaAW/V44yVXrxatXaQ6n/200MkqLY11ChcilXzT+AAAAAAD9////AgDh9QUAAAAAIlEgZ91o/7nlnNfUBHUB3r49jM/qe1XmlNDV/7sOhq7hgPZlEBAkAQAAACJRIGfdaP+55ZzX1AR1Ad6+PYzP6ntV5pTQ1f+7Doau4YD2AAAAAE8BBDWHzwAAAAAAAAAAAA1AItJh9Nhh7/N92XW3W2vMfit2gCOOO1j/6HKuwbgvA63PIu31XxCfhL/etap2KRiSMCOEOUUG9f5u5StDYJXIBMBhd8wAAQErAPIFKgEAAAAiUSBn3Wj/ueWc19QEdQHevj2Mz+p7VeaU0NX/uw6GruGA9iEWVSEt/3s9foEmaHpi/QQ1o/tN5W2a+a4jocnKBbNJyOIZAMBhd8xWAACAAQAAgAAAAIAFAAAAAAAAACEWzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukFAAbYZgchFtZEsba0rVY3RLO1NPryqBMu9Np3coiJLCYMxXpkT+Z2GQDAYXfMVgAAgAEAAIAAAACABAAAAAAAAAABFyDOV9KXXWEk1/IZuWDT9pDVzosqqbRxy31XxU/vRZTC6SIaA85X0pddYSTX8hm5YNP2kNXOiyqptHHLfVfFT+9FlMLpQgPWRLG2tK1WN0SztTT68qgTLvTad3KIiSwmDMV6ZE/mdgNVIS3/ez1+gSZoemL9BDWj+03lbZr5riOhycoFs0nI4gABBSDOV9KXXWEk1/IZuWDT9pDVzosqqbRxy31XxU/vRZTC6SEHzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukFAAbYZgcAAQUgzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukhB85X0pddYSTX8hm5YNP2kNXOiyqptHHLfVfFT+9FlMLpBQAG2GYHAA==").unwrap();
             },
             _ => {
                 panic!("Invalid test psbt index {}", i);
@@ -274,7 +264,7 @@ mod tests {
         let secp = ZkpSecp256k1::new();
         let normal_secp = Secp256k1::new();
 
-        let mut psbt = get_test_psbt(1);
+        let psbt = get_test_psbt(1);
 
         let PartyData { privkey: privkey1, pubkey: pubkey1 } = get_test_party(4);
         let PartyData { privkey: privkey2, pubkey: pubkey2 } = get_test_party(5);
@@ -283,7 +273,7 @@ mod tests {
 
         let participating1 = FindParticipatingKeys::from_iter(once(pubkey1.clone()));
         let participating1: Vec<CoreContext> = participating1.iter_participating_context(&normal_secp, &secp, &musig_psbt)
-            .map(|(input_index, arg)| {
+            .map(|(_input_index, arg)| {
                 let (pk, context) = arg.expect("valid context");
                 assert_eq!(pk, pubkey1);
                 context
@@ -294,7 +284,7 @@ mod tests {
 
         let participating2 = FindParticipatingKeys::from_iter(once(pubkey2.clone()));
         let participating2: Vec<CoreContext> = participating2.iter_participating_context(&normal_secp, &secp, &musig_psbt)
-            .map(|(input_index, arg)| {
+            .map(|(_input_index, arg)| {
                 let (pk, context) = arg.expect("valid context");
                 assert_eq!(pk, pubkey2);
                 context
@@ -341,5 +331,7 @@ mod tests {
         let tx2 = sigaggpsbt2.psbt.extract_tx();
 
         assert_eq!(tx1, tx2);
+
+        //println!("tx: {}", bitcoin::consensus::encode::serialize_hex(&tx1));
     }
 }

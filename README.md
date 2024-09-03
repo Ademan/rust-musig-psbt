@@ -8,7 +8,7 @@ Caveat emptor! See Warning section.
 2. Be useful to third parties as a library (after careful review)
 3. Provide a rudimentary command line tool excercising library features
 
-This repo implements the [draft bip](https://github.com/achow101/bips/tree/musig2-psbt) for signing psbts using musig.
+This repo implements [bip-0373](https://github.com/bitcoin/bips/blob/master/bip-0373.mediawiki) for signing psbts using musig.
 
 ### Open Questions
 
@@ -29,7 +29,6 @@ This code is un-reviewed, barely tested, and cobbled together by the author as h
 
 ## Known Issues
 
-* Completely out of date with the final version of the BIP (TODO)
 * Wildly insufficient tests
 * Zero third party review
 * Doesn't support taproot script spend (TODO)
