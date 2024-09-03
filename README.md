@@ -29,6 +29,7 @@ This code is un-reviewed, barely tested, and cobbled together by the author as h
 
 ## Known Issues
 
+* Completely out of date with the final version of the BIP (TODO)
 * Wildly insufficient tests
 * Zero third party review
 * Doesn't support taproot script spend (TODO)
