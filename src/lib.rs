@@ -297,7 +297,7 @@ mod tests {
         let (idx2, ref corectx2) = (0, &participating2[0]);
 
         assert_eq!(idx1, idx2);
-        assert_eq!(corectx1.xonly_key(), corectx2.xonly_key());
+        assert_eq!(corectx1.xonly_public_key(), corectx2.xonly_public_key());
 
         let extra_rand = [0u8; 32];
         let session1 = MusigSessionId::assume_unique_per_nonce_gen([1u8; 32]);

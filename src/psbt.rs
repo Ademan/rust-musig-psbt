@@ -391,12 +391,40 @@ impl CoreContext {
     /// Is this context for a keyspend
     pub fn is_key_spend(&self) -> bool { self.tap_leaf.is_none() }
 
-    pub fn xonly_key(&self) -> XOnlyPublicKey {
+    /// Retrieve the effective aggregate key
+    ///
+    /// This is the aggregate public key after applying relevant bip32 derivations
+    /// and tweaking for key spends.
+    pub fn public_key(&self) -> PublicKey {
+        self.keyagg_cache.agg_pk_full().from_zkp()
+    }
+
+    /// Retrieve the effective aggregate key (x-only)
+    ///
+    /// This is the exact x-only output public key for key spends or the actual x-only
+    /// public key as it appears in the script for script spends.
+    pub fn xonly_public_key(&self) -> XOnlyPublicKey {
         self.keyagg_cache.agg_pk().from_zkp()
     }
 
+    /// Retrieve the effective aggregate key without tweaks
+    ///
+    /// This is the public key prior to any bip32 derivation and/or tweaking
+    /// for key spends.
+    pub fn untweaked_public_key(&self) -> PublicKey {
+        self.key_agg_pk.from_zkp()
+    }
+
+    /// Retrieve the effective aggregate key without tweaks (x-only)
+    ///
+    /// This is the x-only public key prior to any bip32 derivation and/or
+    /// tweaking for key spends.
+    pub fn untweaked_xonly_public_key(&self) -> XOnlyPublicKey {
+        self.key_agg_pk.x_only_public_key().0.from_zkp()
+    }
+
     fn psbt_key_with_pubkey(&self, pubkey: &ZkpPublicKey) -> (PublicKey, PublicKey, Option<TapLeafHash>) {
-        (pubkey.from_zkp(), self.keyagg_cache.agg_pk_full().from_zkp(), self.tap_leaf)
+        (pubkey.from_zkp(), self.public_key(), self.tap_leaf)
     }
 
     /// Generate musig nonces
