@@ -87,10 +87,9 @@ use crate::{
 };
 
 use crate::serialize::{
-    MusigPsbt,
     MusigPsbtInput,
-    MusigPsbtKeyValue,
     ParticipantPubkeysKeyValue,
+    MusigPsbtInputs,
     MusigPsbtInputSerializer,
     VariableLengthArray,
 };
@@ -309,7 +308,8 @@ impl CoreContext {
         } else {
             CoreContext::new_key_spend(secp,
                                        pubkeys,
-                                       input.tap_merkle_root.clone(), derivation_path)
+                                       input.tap_merkle_root.clone(),
+                                       derivation_path)
         }
     }
 
@@ -376,6 +376,16 @@ impl CoreContext {
         MusigKeyAggCache::new(secp, &zkp_participant_pubkeys[..])
     }
 
+    pub fn get_aggregate_key<'a, I: Iterator<Item=&'a PublicKey>, C: ZkpVerification>(secp: &ZkpSecp256k1<C>, participant_pubkeys: I) -> PublicKey {
+        let zkp_participant_pubkeys: Vec<ZkpPublicKey> = participant_pubkeys
+            .map(|pk| pk.to_zkp())
+            .collect();
+
+        let keyagg_cache = MusigKeyAggCache::new(secp, &zkp_participant_pubkeys[..]);
+
+        keyagg_cache.agg_pk_full().from_zkp()
+    }
+
     // TODO: allow derivation too
     /// Create new core context from an input's keyspend
     pub fn from_keyspend_input<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, input: &PsbtInput, participant_pubkeys: &[PublicKey], derivation: DerivationPath) -> Result<Option<Self>, CoreContextCreateError> {
@@ -428,9 +438,9 @@ impl CoreContext {
     }
 
     /// Generate musig nonces
-    pub fn generate_nonce<'a, C: ZkpVerification + ZkpSigning>(&'a self, secp: &ZkpSecp256k1<C>, pubkey: PublicKey, psbt: &PartiallySignedTransaction, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a>, NonceGenerateError> {
-        let sighash = taproot_sighash(psbt, input_index, self.tap_leaf)
-            .map_err(|e| NonceGenerateError::SighashError(e))?;
+    pub fn generate_nonce<'a, C: ZkpVerification + ZkpSigning>(&'a self, secp: &ZkpSecp256k1<C>, pubkey: PublicKey, sighash: &TapSighash, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a>, NonceGenerateError> {
+        //let sighash = taproot_sighash(psbt, input_index, self.tap_leaf)
+            //.map_err(|e| NonceGenerateError::SighashError(e))?;
 
         let sighash_message = Message::from_digest_slice(sighash.as_ref())
             .map_err(|_| NonceGenerateError::InvalidSighashError)?;
@@ -451,23 +461,11 @@ impl CoreContext {
     }
 
     /// Generate musig nonces and add public nonce to PSBT
-    pub fn add_nonce<'a, C: ZkpVerification + ZkpSigning>(&'a self, secp: &ZkpSecp256k1<C>, pubkey: PublicKey, psbt: &mut MusigPsbt, input_index: usize, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a>, NonceGenerateError> {
+    pub fn add_nonce<'a, C: ZkpVerification + ZkpSigning>(&'a self, secp: &ZkpSecp256k1<C>, pubkey: PublicKey, musig_input: &mut MusigPsbtInput, sighash: &TapSighash, session: MusigSessionId, extra_rand: [u8; 32]) -> Result<SignContext<'a>, NonceGenerateError> {
         let psbt_key = self.psbt_key_with_pubkey(&pubkey.to_zkp());
 
-        let context = self.generate_nonce(secp, pubkey, psbt, input_index, session, extra_rand)?;
+        let context = self.generate_nonce(secp, pubkey, sighash, session, extra_rand)?;
 
-        let input = psbt.inputs
-            .get_mut(input_index)
-            .ok_or(NonceGenerateError::InvalidInputIndexError)?;
-
-        input.add_item(psbt_key, context.pubnonce)
-            .map_err(|_| NonceGenerateError::SerializeError)?;
-
-        // FIXME: a bit jank to maintain the parallel MusigPsbtInput as a cache but oh well...
-        // Maybe I can hide the real psbt inside and only use the cache if/until it gets serialized
-        // out
-        let musig_input = psbt.musig_inputs.get_mut(input_index)
-            .ok_or(NonceGenerateError::InvalidInputIndexError)?;
         musig_input.public_nonce.insert(psbt_key, context.pubnonce);
 
         Ok(context)
@@ -501,10 +499,7 @@ pub enum SignError {
 
 impl<'a> SignContext<'a> {
     /// Calculate partial signature
-    pub fn get_partial_signature<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, privkey: &SecretKey, psbt: &MusigPsbt, input_index: usize) -> Result<(SignatureAggregateContext<'a>, MusigPartialSignature), SignError> {
-        let (_input, musig_input) = psbt.get_input(input_index)
-            .ok_or(SignError::InvalidInputIndexError)?;
-
+    pub fn get_partial_signature<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, privkey: &SecretKey, musig_input: &MusigPsbtInput, sighash: &TapSighash) -> Result<(SignatureAggregateContext<'a>, MusigPartialSignature), SignError> {
         let pubnonces: BTreeMap<PublicKey, MusigPubNonce> = musig_input.public_nonce.iter()
             .filter_map(|((pk, agg_pk, tap_leaf), pub_nonce)| {
                 let derived_agg_key = self.core.keyagg_cache.agg_pk_full();
@@ -527,9 +522,6 @@ impl<'a> SignContext<'a> {
         let key_pair = ZkpKeyPair::from_secret_key(secp, &privkey.to_zkp());
 
         let aggnonce = MusigAggNonce::new(secp, &sorted_nonces[..]);
-
-        let sighash = taproot_sighash(psbt, input_index, self.core.tap_leaf)
-            .map_err(|_| SignError::SighashError)?;
 
         let sighash_message = Message::from_digest_slice(sighash.as_ref())
             .map_err(|_| SignError::SighashError)?;
@@ -564,21 +556,11 @@ impl<'a> SignContext<'a> {
     }
 
     /// Calculate a partial signature on an input and add it to the PSBT
-    pub fn sign<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, privkey: &SecretKey, psbt: &mut MusigPsbt, input_index: usize) -> Result<SignatureAggregateContext<'a>, SignError> {
+    pub fn sign<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, privkey: &SecretKey, musig_input: &mut MusigPsbtInput, sighash: &TapSighash) -> Result<SignatureAggregateContext<'a>, SignError> {
         let psbt_key = self.core.psbt_key_with_pubkey(&self.pubkey);
 
-        let (agg_context, partial_signature) = self.get_partial_signature(secp, privkey, psbt, input_index)?;
+        let (agg_context, partial_signature) = self.get_partial_signature(secp, privkey, musig_input, sighash)?;
 
-        let input = psbt.inputs
-            .get_mut(input_index)
-            .ok_or(SignError::InvalidInputIndexError)?;
-
-        input.add_item(psbt_key, partial_signature)
-            .map_err(|_| SignError::SerializeError)?;
-
-        // FIXME: still janky
-        let musig_input = psbt.musig_inputs.get_mut(input_index)
-            .ok_or(SignError::InvalidInputIndexError)?;
         musig_input.partial_signature.insert(psbt_key, partial_signature);
 
         Ok(agg_context)
@@ -611,10 +593,7 @@ pub enum SignatureAggregateError {
 
 impl<'a> SignatureAggregateContext<'a> {
     /// Validate and combine partial signatures, computing a final aggregate signature
-    pub fn get_aggregate_signature<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, psbt: &MusigPsbt, input_index: usize) -> Result<ZkpSchnorrSignature, SignatureAggregateError> {
-        let (_input, musig_input) = psbt.get_input(input_index)
-            .ok_or(SignatureAggregateError::InvalidInputIndexError)?;
-
+    pub fn get_aggregate_signature<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, musig_input: &MusigPsbtInput) -> Result<ZkpSchnorrSignature, SignatureAggregateError> {
         let partial_signatures: BTreeMap<PublicKey, MusigPartialSignature> = musig_input.partial_signature.iter()
             .filter_map(|((pk, agg_pk, tap_leaf), partial_signature)| {
                 let derived_agg_key = self.core.keyagg_cache.agg_pk_full();
@@ -632,14 +611,10 @@ impl<'a> SignatureAggregateContext<'a> {
     }
 
     /// Update a psbt input with a newly calculated aggregate signature
-    pub fn aggregate_signatures<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, psbt: &mut MusigPsbt, input_index: usize) -> Result<(), SignatureAggregateError> {
+    pub fn aggregate_signatures<C: ZkpSigning>(self, secp: &ZkpSecp256k1<C>, input: &mut PsbtInput, musig_input: &MusigPsbtInput) -> Result<(), SignatureAggregateError> {
         let xonly_agg_pk = self.core.keyagg_cache.agg_pk().from_zkp();
         let tap_leaf = self.core.tap_leaf;
-        let signature = self.get_aggregate_signature(secp, psbt, input_index)?;
-
-        let input = psbt.inputs
-            .get_mut(input_index)
-            .ok_or(SignatureAggregateError::InvalidInputIndexError)?;
+        let signature = self.get_aggregate_signature(secp, musig_input)?;
 
         let sighash = input.taproot_hash_ty()
             .map_err(|_| SignatureAggregateError::IncompatibleSighashError)?;
@@ -715,9 +690,10 @@ pub enum OutpointsMapError {
     InvalidPrevoutIndex,
 }
 
+#[cfg(feature="verify")]
 #[derive(Debug,Clone)]
 pub enum VerifyError {
-    VerificationFailed,
+    VerificationFailed(bitcoin::script::Error),
     OutpointsMapError(OutpointsMapError),
 }
 
@@ -795,7 +771,7 @@ impl PsbtHelper for PartiallySignedTransaction {
         tx.verify(|outpoint| {
             outpoints.get(outpoint).map(|txout| txout.clone())
         })
-        .map_err(|_e| VerifyError::VerificationFailed)
+        .map_err(|e| VerifyError::VerificationFailed(e))
     }
 }
 
@@ -830,29 +806,6 @@ pub enum ParticipantsAddError {
     InvalidIndex,
     SerializeError,
     NoScriptPubkey,
-}
-
-pub trait PsbtInputUpdater {
-    fn update_musig<F: MusigPsbtFilter>(&mut self, _input: &PsbtInput, musig_input: &MusigPsbtInput, filter: F) -> Result<usize, DeserializeError>;
-}
-
-impl PsbtInputUpdater for MusigPsbtInput {
-    fn update_musig<F: MusigPsbtFilter>(&mut self, _input: &PsbtInput, musig_input: &MusigPsbtInput, filter: F) -> Result<usize, DeserializeError> {
-        let mut updated = 0;
-
-        for kv in musig_input.iter_musig_kvs() {
-            if filter.filter_key(&kv) {
-                match kv {
-                    MusigPsbtKeyValue::Participants((k, v)) => { self.participants.insert(*k, v.clone()); }
-                    MusigPsbtKeyValue::PublicNonce((k, v)) => { self.public_nonce.insert(*k, *v); }
-                    MusigPsbtKeyValue::PartialSignature((k, v)) => { self.partial_signature.insert(*k, *v); }
-                }
-                updated += 1;
-            }
-        }
-
-        Ok(updated)
-    }
 }
 
 /// Helper to update PSBT with additional information
@@ -942,74 +895,6 @@ impl PsbtUpdater for PartiallySignedTransaction {
             .map_err(|_| ParticipantsAddError::SerializeError)?;
 
         Ok(ParticipantsAddResult::ParticipantsAdded)
-    }
-}
-
-pub trait MusigPsbtFilter {
-    fn filter_key<'a>(&self, kv: &MusigPsbtKeyValue<'a>) -> bool;
-}
-
-impl<T: Fn(&MusigPsbtKeyValue) -> bool> MusigPsbtFilter for T {
-    fn filter_key<'a>(&self, kv: &MusigPsbtKeyValue<'a>) -> bool
-    {
-        self(kv)
-    }
-}
-
-pub struct FilterEntry {
-    /// Match Musig Public Nonces
-    nonces: bool,
-
-    /// Match Musig Partial Signatures
-    signatures: bool,
-
-    /// Match Musig Participants
-    participants: bool,
-
-    /// The aggregate public key match
-    agg_pk: Option<PublicKey>,
-
-    /// The subset of participant public keys to match
-    pubkeys: HashSet<PublicKey>,
-}
-
-impl MusigPsbtFilter for FilterEntry {
-    fn filter_key<'a>(&self, kv: &MusigPsbtKeyValue<'a>) -> bool
-    {
-        let type_matches = match kv {
-            MusigPsbtKeyValue::Participants(_) => self.participants,
-            MusigPsbtKeyValue::PublicNonce(_) => self.nonces,
-            MusigPsbtKeyValue::PartialSignature(_) => self.signatures,
-        };
-
-        if !type_matches {
-            return false;
-        }
-
-        if let Some(ref agg_pk) = self.agg_pk {
-            if agg_pk != kv.get_agg_pk() {
-                return false;
-            }
-        }
-
-        if !self.pubkeys.is_empty() {
-            let pubkey_matches = match kv {
-                MusigPsbtKeyValue::Participants((_agg_pk, participants)) => {
-                    // TODO: review, is this really our desired behavior? probably not imho, any()
-                    // probably makes more sense. Could also just make it be up to the caller, have
-                    // two bundles of pubkeys
-                    participants.iter().all(|pk| self.pubkeys.contains(pk))
-                }
-                MusigPsbtKeyValue::PublicNonce(((pk, _agg_pk, _), _)) => self.pubkeys.contains(pk),
-                MusigPsbtKeyValue::PartialSignature(((pk, _agg_pk, _), _)) => self.pubkeys.contains(pk),
-            };
-
-            if !pubkey_matches {
-                return false;
-            }
-        }
-
-        return true;
     }
 }
 
@@ -1301,15 +1186,16 @@ impl FindParticipatingKeys {
             )
     }
 
-    pub fn iter_participating_context<'a, 'secp, 'r, C: Verification, ZC: ZkpVerification>(&'a self, secp: &'secp Secp256k1<C>, zkp_secp: &'secp ZkpSecp256k1<ZC>, psbt: &'r MusigPsbt) -> impl Iterator<Item=(usize, Result<(PublicKey, CoreContext), CoreContextCreateError>)> + 'r
+    pub fn iter_participating_context<'s, 'secp, 'm, 'r, C: Verification, ZC: ZkpVerification>(&'s self, secp: &'secp Secp256k1<C>, zkp_secp: &'secp ZkpSecp256k1<ZC>, psbt: &'r PartiallySignedTransaction, musig_inputs: &'m MusigPsbtInputs) -> impl Iterator<Item=(usize, Result<(PublicKey, CoreContext), CoreContextCreateError>)> + 'r
     where
         'secp: 'r,
-        'a: 'r,
+        's: 'r,
+        'm: 'r,
     {
-        psbt.iter_musig_inputs()
+        psbt.inputs.iter().zip(musig_inputs.iter())
             .enumerate()
-            .map(move |(index, (musig_input, input))| {
-                self.iter_participating_input_context(secp, zkp_secp, musig_input, input)
+            .map(move |(index, (input, musig_input))| {
+                self.iter_participating_input_context(secp, zkp_secp, input, musig_input)
                     .map(move |result| (index, result))
             })
             .flatten()

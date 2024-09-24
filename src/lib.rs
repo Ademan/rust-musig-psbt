@@ -36,7 +36,6 @@ pub use crate::psbt::{
     FindParticipatingExtendedKeys,
     FindParticipatingKeys,
     musig_agg_pk_to_xpub,
-    MusigPsbtFilter,
     NonceGenerateError,
     OutpointsMapError,
     ParticipantsAddResult,
@@ -48,15 +47,15 @@ pub use crate::psbt::{
     SignError,
     SpendInfoAddResult,
     TaprootScriptPubkey,
+    taproot_sighash,
     VerifyError,
 };
 
 pub use crate::serialize::{
     DeserializeError,
     MusigPsbtInputSerializer,
-    MusigPsbt,
+    MusigPsbtInputs,
     MusigPsbtInput,
-    MusigPsbtKeyValue,
     ParticipantIndex,
     SerializeError,
     SerializeOrDeserializeError,
@@ -211,8 +210,10 @@ mod tests {
     use crate::{
         CoreContext,
         PsbtHelper,
-        MusigPsbt,
+        MusigPsbtInputs,
+        MusigPsbtInput,
         FindParticipatingKeys,
+        taproot_sighash,
     };
 
     fn hex_privkey(hex: &str) -> SecretKey {
@@ -264,15 +265,15 @@ mod tests {
         let secp = ZkpSecp256k1::new();
         let normal_secp = Secp256k1::new();
 
-        let psbt = get_test_psbt(1);
+        let mut psbt = get_test_psbt(1);
 
         let PartyData { privkey: privkey1, pubkey: pubkey1 } = get_test_party(4);
         let PartyData { privkey: privkey2, pubkey: pubkey2 } = get_test_party(5);
 
-        let mut musig_psbt = MusigPsbt::from_psbt(psbt).unwrap();
+        let musig_inputs = MusigPsbtInputs::from_psbt(&psbt).unwrap();
 
         let participating1 = FindParticipatingKeys::from_iter(once(pubkey1.clone()));
-        let participating1: Vec<CoreContext> = participating1.iter_participating_context(&normal_secp, &secp, &musig_psbt)
+        let participating1: Vec<CoreContext> = participating1.iter_participating_context(&normal_secp, &secp, &psbt, &musig_inputs)
             .map(|(_input_index, arg)| {
                 let (pk, context) = arg.expect("valid context");
                 assert_eq!(pk, pubkey1);
@@ -283,7 +284,7 @@ mod tests {
         assert_eq!(participating1.len(), 1);
 
         let participating2 = FindParticipatingKeys::from_iter(once(pubkey2.clone()));
-        let participating2: Vec<CoreContext> = participating2.iter_participating_context(&normal_secp, &secp, &musig_psbt)
+        let participating2: Vec<CoreContext> = participating2.iter_participating_context(&normal_secp, &secp, &psbt, &musig_inputs)
             .map(|(_input_index, arg)| {
                 let (pk, context) = arg.expect("valid context");
                 assert_eq!(pk, pubkey2);
@@ -303,35 +304,34 @@ mod tests {
         let session1 = MusigSessionId::assume_unique_per_nonce_gen([1u8; 32]);
         let session2 = MusigSessionId::assume_unique_per_nonce_gen([2u8; 32]);
 
-        let signctx1 = corectx1.add_nonce(&secp, pubkey1, &mut musig_psbt, idx1, session1, extra_rand)
+        let sighash1 = taproot_sighash(&psbt, idx1, corectx1.tap_leaf)
+            .expect("sighash");
+        let sighash2 = taproot_sighash(&psbt, idx2, corectx2.tap_leaf)
+            .expect("sighash");
+
+        assert_eq!(sighash1, sighash2);
+
+        let mut musig_input = MusigPsbtInput::from_input(&psbt.inputs[idx1])
+            .expect("psbt input");
+
+        let signctx1 = corectx1.add_nonce(&secp, pubkey1, &mut musig_input, &sighash1, session1, extra_rand)
             .expect("context 1 add nonce");
-        let signctx2 = corectx2.add_nonce(&secp, pubkey2, &mut musig_psbt, idx2, session2, extra_rand)
+        let signctx2 = corectx2.add_nonce(&secp, pubkey2, &mut musig_input, &sighash2, session2, extra_rand)
             .expect("context 2 add nonce");
 
-        let sigaggctx1 = signctx1.sign(&secp, &privkey1, &mut musig_psbt, idx1)
+        let sigaggctx1 = signctx1.sign(&secp, &privkey1, &mut musig_input, &sighash1)
             .expect("context 1 sign success");
-        let sigaggctx2 = signctx2.sign(&secp, &privkey2, &mut musig_psbt, idx2)
+        let sigaggctx2 = signctx2.sign(&secp, &privkey2, &mut musig_input, &sighash1)
             .expect("context 2 sign success");
 
-        let mut sigaggpsbt1 = musig_psbt.clone();
-        let mut sigaggpsbt2 = musig_psbt.clone();
-
-        sigaggctx1.aggregate_signatures(&secp, &mut sigaggpsbt1, idx1)
+        sigaggctx1.aggregate_signatures(&secp, &mut psbt.inputs[idx1], &musig_input)
             .expect("context 1 aggregate signatures");
-        sigaggctx2.aggregate_signatures(&secp, &mut sigaggpsbt2, idx2)
+        sigaggctx2.aggregate_signatures(&secp, &mut psbt.inputs[idx1], &musig_input)
             .expect("context 2 aggregate signatures");
 
-        sigaggpsbt1.finalize_key_spends();
-        sigaggpsbt2.finalize_key_spends();
+        psbt.finalize_key_spends();
 
-        sigaggpsbt1.verify()
+        psbt.verify()
             .expect("validate transaction");
-
-        let tx1 = sigaggpsbt1.psbt.extract_tx();
-        let tx2 = sigaggpsbt2.psbt.extract_tx();
-
-        assert_eq!(tx1, tx2);
-
-        //println!("tx: {}", bitcoin::consensus::encode::serialize_hex(&tx1));
     }
 }

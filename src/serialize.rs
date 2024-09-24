@@ -46,11 +46,6 @@ use std::ops::{
     DerefMut,
 };
 
-use crate::{
-    MusigPsbtFilter,
-    psbt::PsbtInputUpdater,
-};
-
 const MUSIG_PARTIAL_SIGNATURE_SERIALIZED_LEN: usize = 32;
 
 // FIXME: psbt key types are actually var ints, once rust-bitcoin updates, update here
@@ -501,84 +496,6 @@ impl MusigPsbtInputSerializer for PsbtInput {
 }
 
 #[derive(Clone)]
-pub struct MusigPsbt {
-    pub psbt: PartiallySignedTransaction,
-    pub musig_inputs: Vec<MusigPsbtInput>,
-}
-
-impl Deref for MusigPsbt {
-    type Target = PartiallySignedTransaction;
-
-    fn deref(&self) -> &Self::Target {
-        &self.psbt
-    }
-}
-
-impl DerefMut for MusigPsbt {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.psbt
-    }
-}
-
-impl MusigPsbt {
-    pub fn from_psbt(psbt: PartiallySignedTransaction) -> Result<MusigPsbt, DeserializeError> {
-        let musig_inputs = psbt.inputs.iter()
-            .map(|input| MusigPsbtInput::from_input(input))
-            .collect::<Result<_, _>>()?;
-
-        Ok(Self {
-            psbt,
-            musig_inputs,
-        })
-    }
-
-    pub fn get_input(&self, index: usize) -> Option<(&PsbtInput, &MusigPsbtInput)> {
-        match (self.psbt.inputs.get(index), self.musig_inputs.get(index)) {
-            (Some(input), Some(musig_input)) => Some((input, musig_input)),
-            (None, None) => None,
-            _ => {
-                // FIXME: is this too extreme?
-                panic!("MusigPsbt inconsistent data");
-            }
-        }
-    }
-
-    pub fn iter_musig_inputs(&self) -> impl Iterator<Item = (&PsbtInput, &MusigPsbtInput)> {
-        self.inputs.iter().zip(self.musig_inputs.iter())
-    }
-
-    pub fn iter_musig_inputs_mut(&mut self) -> impl Iterator<Item = (&PsbtInput, &mut MusigPsbtInput)> {
-        self.psbt.inputs.iter().zip(self.musig_inputs.iter_mut())
-    }
-
-    pub fn update_musig<F: MusigPsbtFilter + Copy>(&mut self, other: &MusigPsbt, filter: F) -> Result<usize, DeserializeError> {
-        let results = self.musig_inputs.iter_mut()
-            .zip(other.psbt.inputs.iter().zip(other.musig_inputs.iter()))
-            .map(|(musig_input, (other_input, other_musig_input))| {
-                musig_input.update_musig(other_input, other_musig_input, filter)
-            });
-
-        // FIXME: is there a better way to sum a fallible iterator?
-        let mut sum: usize = 0;
-        for result in results {
-            sum += result?;
-        }
-
-        Ok(sum)
-    }
-
-    pub fn into_psbt(self) -> Result<PartiallySignedTransaction, SerializeError> {
-        let mut psbt = self.psbt;
-
-        for (input, musig_input) in psbt.inputs.iter_mut().zip(self.musig_inputs) {
-            musig_input.serialize_into_input(input)?;
-        }
-
-        Ok(psbt)
-    }
-}
-
-#[derive(Clone)]
 pub struct MusigPsbtInput {
     pub participants: BTreeMap<ParticipantPubkeysKey, Vec<PublicKey>>,
     pub public_nonce: BTreeMap<PublicNonceKey, PublicNonceValue>,
@@ -586,6 +503,14 @@ pub struct MusigPsbtInput {
 }
 
 impl MusigPsbtInput {
+    pub fn new() -> Self {
+        MusigPsbtInput {
+            participants: BTreeMap::new(),
+            public_nonce: BTreeMap::new(),
+            partial_signature: BTreeMap::new(),
+        }
+    }
+
     pub fn from_input(input: &PsbtInput) -> Result<MusigPsbtInput, DeserializeError> {
         let mut participants: BTreeMap<ParticipantPubkeysKey, Vec<PublicKey>> = BTreeMap::new();
         let mut public_nonce: BTreeMap<PublicNonceKey, PublicNonceValue> = BTreeMap::new();
@@ -620,27 +545,6 @@ impl MusigPsbtInput {
         })
     }
 
-    pub fn iter_musig_kvs<'a>(&'a self) -> impl Iterator<Item = MusigPsbtKeyValue<'a>> {
-        self.participants.iter()
-            .map(|(k, v)| MusigPsbtKeyValue::Participants((k, v)))
-            .chain(
-                self.public_nonce.iter()
-                    .map(|(k, v)| MusigPsbtKeyValue::PublicNonce((k, v)))
-            )
-            .chain(
-                self.partial_signature.iter()
-                    .map(|(k, v)| MusigPsbtKeyValue::PartialSignature((k, v)))
-            )
-    }
-
-    pub fn update(&mut self, kv: MusigPsbtKeyValue<'_>) {
-        match kv {
-            MusigPsbtKeyValue::Participants((k, v)) => { self.participants.insert(*k, v.clone()); }
-            MusigPsbtKeyValue::PublicNonce((k, v)) => { self.public_nonce.insert(*k, *v); }
-            MusigPsbtKeyValue::PartialSignature((k, v)) => { self.partial_signature.insert(*k, *v); }
-        }
-    }
-
     pub fn serialize_into_input(&self, input: &mut PsbtInput) -> Result<(), SerializeError> {
         for (agg_pk, participants) in self.participants.iter() {
             input.add_participants(*agg_pk, &participants[..])?;
@@ -658,19 +562,53 @@ impl MusigPsbtInput {
     }
 }
 
-pub enum MusigPsbtKeyValue<'a> {
-    Participants((&'a ParticipantPubkeysKey, &'a Vec<PublicKey>)),
-    PublicNonce((&'a PublicNonceKey, &'a PublicNonceValue)),
-    PartialSignature((&'a PartialSignatureKey, &'a PartialSignatureValue)),
-}
+pub struct MusigPsbtInputs(Vec<MusigPsbtInput>);
 
-impl<'a> MusigPsbtKeyValue<'a> {
-    pub fn get_agg_pk(&self) -> &'a PublicKey {
-        match self {
-            MusigPsbtKeyValue::Participants(participants) => &participants.0,
-            MusigPsbtKeyValue::PublicNonce(pubnonce) => &pubnonce.0.1,
-            MusigPsbtKeyValue::PartialSignature(sig) => &sig.0.1,
-        }
+impl Deref for MusigPsbtInputs {
+    type Target = Vec<MusigPsbtInput>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
+impl DerefMut for MusigPsbtInputs {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl MusigPsbtInputs {
+    pub fn from_psbt(psbt: &PartiallySignedTransaction) -> Result<Self, DeserializeError> {
+        let musig_inputs = psbt.inputs.iter()
+            .map(|input| MusigPsbtInput::from_input(input))
+            .collect::<Result<Vec<MusigPsbtInput>, _>>()?;
+
+        Ok(Self ( musig_inputs ))
+    }
+
+    pub fn iter_musig_inputs<'s, 'p, 'r>(&'s self, psbt: &'p PartiallySignedTransaction) -> impl Iterator<Item = (&'r PsbtInput, &'r MusigPsbtInput)>
+    where
+        'p: 'r,
+        's: 'r,
+    {
+        psbt.inputs.iter().zip(self.0.iter())
+    }
+
+    pub fn iter_musig_inputs_mut<'s, 'p, 'r>(&'s mut self, psbt: &'p mut PartiallySignedTransaction) -> impl Iterator<Item = (&'r PsbtInput, &'r mut MusigPsbtInput)>
+    where
+        'p: 'r,
+        's: 'r,
+    {
+        psbt.inputs.iter().zip(self.0.iter_mut())
+    }
+
+    /// Update a psbt with these musig keys
+    pub fn update_psbt(&self, psbt: &mut PartiallySignedTransaction) -> Result<(), SerializeError> {
+        for (input, musig_input) in psbt.inputs.iter_mut().zip(self.0.iter()) {
+            musig_input.serialize_into_input(input)?;
+        }
+
+        Ok(())
+    }
+}
