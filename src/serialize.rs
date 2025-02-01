@@ -1,14 +1,13 @@
-use bitcoin::VarInt;
+use bitcoin::{
+    Psbt,
+    psbt::Input as PsbtInput,
+    psbt::raw::Key as PsbtKey,
+    VarInt,
+};
 
 use bitcoin::consensus::encode::{
     Decodable,
     Encodable,
-};
-
-use bitcoin::psbt::{
-    Input as PsbtInput,
-    raw::Key as PsbtKey,
-    PartiallySignedTransaction,
 };
 
 use bitcoin::secp256k1::{
@@ -23,6 +22,13 @@ use bitcoin::bip32::{
 
 use bitcoin::taproot::TapLeafHash;
 
+use bitcoin_io::{
+    Write,
+    Read,
+    Error as IoError,
+    ErrorKind as IoErrorKind,
+};
+
 use secp256k1_zkp::{
     MusigPartialSignature,
     MusigPubNonce,
@@ -33,10 +39,6 @@ use std::collections::BTreeMap;
 
 use std::io::{
     Cursor,
-    Error as IoError,
-    ErrorKind as IoErrorKind,
-    Read,
-    Write,
 };
 
 use std::mem::size_of;
@@ -579,7 +581,7 @@ impl DerefMut for MusigPsbtInputs {
 }
 
 impl MusigPsbtInputs {
-    pub fn from_psbt(psbt: &PartiallySignedTransaction) -> Result<Self, DeserializeError> {
+    pub fn from_psbt(psbt: &Psbt) -> Result<Self, DeserializeError> {
         let musig_inputs = psbt.inputs.iter()
             .map(|input| MusigPsbtInput::from_input(input))
             .collect::<Result<Vec<MusigPsbtInput>, _>>()?;
@@ -587,7 +589,7 @@ impl MusigPsbtInputs {
         Ok(Self ( musig_inputs ))
     }
 
-    pub fn iter_musig_inputs<'s, 'p, 'r>(&'s self, psbt: &'p PartiallySignedTransaction) -> impl Iterator<Item = (&'r PsbtInput, &'r MusigPsbtInput)>
+    pub fn iter_musig_inputs<'s, 'p, 'r>(&'s self, psbt: &'p Psbt) -> impl Iterator<Item = (&'r PsbtInput, &'r MusigPsbtInput)>
     where
         'p: 'r,
         's: 'r,
@@ -595,7 +597,7 @@ impl MusigPsbtInputs {
         psbt.inputs.iter().zip(self.0.iter())
     }
 
-    pub fn iter_musig_inputs_mut<'s, 'p, 'r>(&'s mut self, psbt: &'p mut PartiallySignedTransaction) -> impl Iterator<Item = (&'r PsbtInput, &'r mut MusigPsbtInput)>
+    pub fn iter_musig_inputs_mut<'s, 'p, 'r>(&'s mut self, psbt: &'p mut Psbt) -> impl Iterator<Item = (&'r PsbtInput, &'r mut MusigPsbtInput)>
     where
         'p: 'r,
         's: 'r,
@@ -604,7 +606,7 @@ impl MusigPsbtInputs {
     }
 
     /// Update a psbt with these musig keys
-    pub fn update_psbt(&self, psbt: &mut PartiallySignedTransaction) -> Result<(), SerializeError> {
+    pub fn update_psbt(&self, psbt: &mut Psbt) -> Result<(), SerializeError> {
         for (input, musig_input) in psbt.inputs.iter_mut().zip(self.0.iter()) {
             musig_input.serialize_into_input(input)?;
         }

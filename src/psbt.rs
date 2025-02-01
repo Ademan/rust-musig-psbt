@@ -1,7 +1,9 @@
 use bitcoin::{
     Address,
     Network,
+    NetworkKind,
     OutPoint,
+    Psbt,
     Script,
     ScriptBuf,
     TxOut,
@@ -43,8 +45,6 @@ use bitcoin::taproot::{
 };
 
 use bitcoin::secp256k1::XOnlyPublicKey;
-
-use bitcoin::psbt::PartiallySignedTransaction;
 
 use secp256k1_zkp::{
     Message,
@@ -139,14 +139,14 @@ pub enum TweakError {
     DerivationError,
 }
 
-pub fn musig_agg_pk_to_xpub(pk: PublicKey, network: Network) -> ExtendedPubKey {
+pub fn musig_agg_pk_to_xpub(pk: PublicKey, network: NetworkKind) -> ExtendedPubKey {
     ExtendedPubKey {
-        network,
         depth: 0,
         parent_fingerprint: Default::default(),
         child_number: ChildNumber::Normal{index: 0},
         public_key: pk,
         chain_code: ChainCode::from(MUSIG_ROOT_CHAIN_CODE),
+        network,
     }
 }
 
@@ -159,7 +159,7 @@ where
 {
     // XXX: because the only the chaincode and key are used in deriving the next key, it is ok
     // to hard code the network, it's not part of the derivation.
-    let mut xpub = musig_agg_pk_to_xpub(keyagg_cache.agg_pk_full().from_zkp(), Network::Bitcoin);
+    let mut xpub = musig_agg_pk_to_xpub(keyagg_cache.agg_pk_full().from_zkp(), NetworkKind::Main);
 
     for child_number in derivation_path.into_iter() {
         let (tweak, chain_code) = xpub.ckd_pub_tweak(child_number)
@@ -169,7 +169,7 @@ where
             .map_err(|_| TweakError::DerivationError)?;
 
         xpub = ExtendedPubKey {
-            network: Network::Bitcoin,
+            network: NetworkKind::Main,
             depth: xpub.depth + 1,
             parent_fingerprint: Default::default(),
             child_number,
@@ -197,7 +197,7 @@ fn tweak_keyagg_keyspend<C: ZkpVerification>(secp: &ZkpSecp256k1<C>, keyagg_cach
 }
 
 /// Generate the sighash to sign for a taproot input
-pub fn taproot_sighash(psbt: &PartiallySignedTransaction, input_index: usize, tap_leaf: Option<TapLeafHash>) -> Result<TapSighash, SighashError> {
+pub fn taproot_sighash(psbt: &Psbt, input_index: usize, tap_leaf: Option<TapLeafHash>) -> Result<TapSighash, SighashError> {
     let psbt_input = psbt.inputs.get(input_index)
         .ok_or(SighashError::InvalidInputIndexError)?;
 
@@ -291,7 +291,7 @@ impl TaprootScriptPubkey {
     }
     /// Calculate script pubkey
     pub fn script_pubkey<C: Verification>(&self, secp: &Secp256k1<C>) -> ScriptBuf {
-        ScriptBuf::new_v1_p2tr(secp, self.internal_key, self.merkle_root)
+        ScriptBuf::new_p2tr(secp, self.internal_key, self.merkle_root)
     }
 
     /// Calculate address
@@ -620,8 +620,8 @@ impl<'a> SignatureAggregateContext<'a> {
             .map_err(|_| SignatureAggregateError::IncompatibleSighashError)?;
 
         let schnorr_sig = Signature {
-            sig: signature.from_zkp(),
-            hash_ty: sighash,
+            signature: signature.from_zkp(),
+            sighash_type: sighash,
         };
 
         if let Some(tap_leaf) = tap_leaf {
@@ -693,7 +693,9 @@ pub enum OutpointsMapError {
 #[cfg(feature="verify")]
 #[derive(Debug,Clone)]
 pub enum VerifyError {
-    VerificationFailed(bitcoin::script::Error),
+    // FIXME: rename
+    ExtractError,
+    VerificationFailed(bitcoin::transaction::TxVerifyError),
     OutpointsMapError(OutpointsMapError),
 }
 
@@ -709,7 +711,7 @@ pub trait PsbtHelper {
     fn verify(&self) -> Result<(), VerifyError>;
 }
 
-impl PsbtHelper for PartiallySignedTransaction {
+impl PsbtHelper for Psbt {
     // TODO: differentiate index out of bounds from other cases?
     fn get_input_script_pubkey(&self, index: usize) -> Option<&Script> {
         let psbt_input = self.inputs.get(index)?;
@@ -766,7 +768,8 @@ impl PsbtHelper for PartiallySignedTransaction {
         let outpoints = self.outpoints_map()
             .map_err(|e| VerifyError::OutpointsMapError(e))?;
 
-        let tx = self.clone().extract_tx();
+        let tx = self.clone().extract_tx()
+            .map_err(|_| VerifyError::ExtractError)?;
 
         tx.verify(|outpoint| {
             outpoints.get(outpoint).map(|txout| txout.clone())
@@ -819,7 +822,7 @@ pub trait PsbtUpdater {
     fn add_input_participants<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, tap_script_pubkey: &TaprootScriptPubkey, index: usize) -> Result<ParticipantsAddResult, ParticipantsAddError>;
 }
 
-impl PsbtUpdater for PartiallySignedTransaction {
+impl PsbtUpdater for Psbt {
     fn add_spend_info<C: Verification>(&mut self, secp: &Secp256k1<C>, context: &CoreContext, tap_script_pubkey: &TaprootScriptPubkey) -> Result<Vec<(usize, SpendInfoAddResult)>, SpendInfoAddError> {
         let mut result: Vec<_> = Vec::new();
         let input_len = self.inputs.len();
@@ -946,7 +949,7 @@ impl FindParticipatingExtendedKeys {
     // xpub. However, the tap derivation could ultimately specify a derivation lower in the key
     // hierarchy that *could* be calculated from known xpubs/xprivs.
     // (Maybe this is a bad API to include...)
-    pub fn from_global_xpubs<'a, I: Iterator<Item=(&'a Fingerprint, &'a ExtendedPubKey, &'a DerivationPath)>, C: Verification>(secp: &Secp256k1<C>, known_xprivs: I, psbt: &PartiallySignedTransaction) -> Self {
+    pub fn from_global_xpubs<'a, I: Iterator<Item=(&'a Fingerprint, &'a ExtendedPubKey, &'a DerivationPath)>, C: Verification>(secp: &Secp256k1<C>, known_xprivs: I, psbt: &Psbt) -> Self {
         let mut known_xprivs_in_global_xpubs: Vec<(Fingerprint, ExtendedPubKey, DerivationPath, usize)> = known_xprivs
             .map(|(fingerprint, xpub, derivation_path)| {
                 psbt.xpub.iter()
@@ -1003,7 +1006,7 @@ impl FindParticipatingExtendedKeys {
                         // FIXME: is this right?
                         xpub_derive(secp, xpub, xpub_path, derivation)
                             .and_then(|(derived_xpub, derived_path)| {
-                                let derived_pubkey = derived_xpub.to_pub().inner;
+                                let derived_pubkey = derived_xpub.to_pub().0;
 
                                 let (parity_insensitive_pk, _parity) = derived_pubkey.x_only_public_key();
 
@@ -1027,7 +1030,7 @@ impl FindParticipatingExtendedKeys {
                             Some(ParticipantInfo {
                                 // XXX: As mentioned elsewhere, the network does not affect
                                 // derivation which makes this valid in general.
-                                agg_xpub: musig_agg_pk_to_xpub(agg_pk.to_owned(), Network::Bitcoin),
+                                agg_xpub: musig_agg_pk_to_xpub(agg_pk.to_owned(), NetworkKind::Main),
                                 tap_leaf: tap_leaf.copied(),
                                 master_fingerprint: fingerprint.to_owned(),
                                 xpub_path: xpub_path.to_owned(),
@@ -1140,7 +1143,7 @@ impl FindParticipatingKeys {
                             .filter_map(move |leaf_hash| {
                                 // XXX: As mentioned elsewhere, the network does not affect
                                 // derivation which makes this valid in general.
-                                let agg_xpub = musig_agg_pk_to_xpub(agg_pk.clone(), Network::Bitcoin);
+                                let agg_xpub = musig_agg_pk_to_xpub(agg_pk.clone(), NetworkKind::Main);
 
                                 // Check that the fingerprint matches
                                 if *new_fingerprint != agg_xpub.fingerprint() {
@@ -1186,7 +1189,7 @@ impl FindParticipatingKeys {
             )
     }
 
-    pub fn iter_participating_context<'s, 'secp, 'm, 'r, C: Verification, ZC: ZkpVerification>(&'s self, secp: &'secp Secp256k1<C>, zkp_secp: &'secp ZkpSecp256k1<ZC>, psbt: &'r PartiallySignedTransaction, musig_inputs: &'m MusigPsbtInputs) -> impl Iterator<Item=(usize, Result<(PublicKey, CoreContext), CoreContextCreateError>)> + 'r
+    pub fn iter_participating_context<'s, 'secp, 'm, 'r, C: Verification, ZC: ZkpVerification>(&'s self, secp: &'secp Secp256k1<C>, zkp_secp: &'secp ZkpSecp256k1<ZC>, psbt: &'r Psbt, musig_inputs: &'m MusigPsbtInputs) -> impl Iterator<Item=(usize, Result<(PublicKey, CoreContext), CoreContextCreateError>)> + 'r
     where
         'secp: 'r,
         's: 'r,

@@ -187,13 +187,15 @@ impl ExtraRand {
 
 #[cfg(test)]
 mod tests {
+    use bitcoin::{
+        Psbt,
+    };
+
     use bitcoin::secp256k1::{
         PublicKey,
         Secp256k1,
         SecretKey,
     };
-
-    use bitcoin::psbt::PartiallySignedTransaction;
 
     use secp256k1_zkp::{
         MusigSessionId,
@@ -249,10 +251,10 @@ mod tests {
         }
     }
 
-    fn get_test_psbt(i: usize) -> PartiallySignedTransaction {
+    fn get_test_psbt(i: usize) -> Psbt {
         match i {
             1 => {
-                return PartiallySignedTransaction::from_str("cHNidP8BAIkCAAAAAXhVYaAW/V44yVXrxatXaQ6n/200MkqLY11ChcilXzT+AAAAAAD9////AgDh9QUAAAAAIlEgZ91o/7nlnNfUBHUB3r49jM/qe1XmlNDV/7sOhq7hgPZlEBAkAQAAACJRIGfdaP+55ZzX1AR1Ad6+PYzP6ntV5pTQ1f+7Doau4YD2AAAAAE8BBDWHzwAAAAAAAAAAAA1AItJh9Nhh7/N92XW3W2vMfit2gCOOO1j/6HKuwbgvA63PIu31XxCfhL/etap2KRiSMCOEOUUG9f5u5StDYJXIBMBhd8wAAQErAPIFKgEAAAAiUSBn3Wj/ueWc19QEdQHevj2Mz+p7VeaU0NX/uw6GruGA9iEWVSEt/3s9foEmaHpi/QQ1o/tN5W2a+a4jocnKBbNJyOIZAMBhd8xWAACAAQAAgAAAAIAFAAAAAAAAACEWzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukFAAbYZgchFtZEsba0rVY3RLO1NPryqBMu9Np3coiJLCYMxXpkT+Z2GQDAYXfMVgAAgAEAAIAAAACABAAAAAAAAAABFyDOV9KXXWEk1/IZuWDT9pDVzosqqbRxy31XxU/vRZTC6SIaA85X0pddYSTX8hm5YNP2kNXOiyqptHHLfVfFT+9FlMLpQgPWRLG2tK1WN0SztTT68qgTLvTad3KIiSwmDMV6ZE/mdgNVIS3/ez1+gSZoemL9BDWj+03lbZr5riOhycoFs0nI4gABBSDOV9KXXWEk1/IZuWDT9pDVzosqqbRxy31XxU/vRZTC6SEHzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukFAAbYZgcAAQUgzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukhB85X0pddYSTX8hm5YNP2kNXOiyqptHHLfVfFT+9FlMLpBQAG2GYHAA==").unwrap();
+                return Psbt::from_str("cHNidP8BAIkCAAAAAXhVYaAW/V44yVXrxatXaQ6n/200MkqLY11ChcilXzT+AAAAAAD9////AgDh9QUAAAAAIlEgZ91o/7nlnNfUBHUB3r49jM/qe1XmlNDV/7sOhq7hgPZlEBAkAQAAACJRIGfdaP+55ZzX1AR1Ad6+PYzP6ntV5pTQ1f+7Doau4YD2AAAAAE8BBDWHzwAAAAAAAAAAAA1AItJh9Nhh7/N92XW3W2vMfit2gCOOO1j/6HKuwbgvA63PIu31XxCfhL/etap2KRiSMCOEOUUG9f5u5StDYJXIBMBhd8wAAQErAPIFKgEAAAAiUSBn3Wj/ueWc19QEdQHevj2Mz+p7VeaU0NX/uw6GruGA9iEWVSEt/3s9foEmaHpi/QQ1o/tN5W2a+a4jocnKBbNJyOIZAMBhd8xWAACAAQAAgAAAAIAFAAAAAAAAACEWzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukFAAbYZgchFtZEsba0rVY3RLO1NPryqBMu9Np3coiJLCYMxXpkT+Z2GQDAYXfMVgAAgAEAAIAAAACABAAAAAAAAAABFyDOV9KXXWEk1/IZuWDT9pDVzosqqbRxy31XxU/vRZTC6SIaA85X0pddYSTX8hm5YNP2kNXOiyqptHHLfVfFT+9FlMLpQgPWRLG2tK1WN0SztTT68qgTLvTad3KIiSwmDMV6ZE/mdgNVIS3/ez1+gSZoemL9BDWj+03lbZr5riOhycoFs0nI4gABBSDOV9KXXWEk1/IZuWDT9pDVzosqqbRxy31XxU/vRZTC6SEHzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukFAAbYZgcAAQUgzlfSl11hJNfyGblg0/aQ1c6LKqm0cct9V8VP70WUwukhB85X0pddYSTX8hm5YNP2kNXOiyqptHHLfVfFT+9FlMLpBQAG2GYHAA==").unwrap();
             },
             _ => {
                 panic!("Invalid test psbt index {}", i);
